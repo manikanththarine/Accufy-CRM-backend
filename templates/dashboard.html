@@ -2,11 +2,20 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>CRM Dashboard</title>
-  <style>
-    body { font-family: Arial; margin: 24px; background: #f7f8fa; }
-    h1, h2 { margin-bottom: 12px; }
+  <title>AI CRM Dashboard</title>
 
+  <style>
+    body {
+      font-family: Arial;
+      margin: 24px;
+      background: #f7f8fa;
+    }
+
+    h1, h2 {
+      margin-bottom: 12px;
+    }
+
+    /* CARDS */
     .cards {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
@@ -21,9 +30,19 @@
       box-shadow: 0 1px 6px rgba(0,0,0,0.08);
     }
 
-    .card h3 { font-size: 14px; color: #666; }
-    .card p { font-size: 22px; font-weight: bold; }
+    .card h3 {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 6px;
+    }
 
+    .card p {
+      font-size: 22px;
+      font-weight: bold;
+      margin: 0;
+    }
+
+    /* TABLE */
     table {
       width: 100%;
       border-collapse: collapse;
@@ -34,12 +53,21 @@
     }
 
     th, td {
-      padding: 10px;
+      padding: 12px;
       border-bottom: 1px solid #eee;
+      font-size: 14px;
     }
 
-    th { background: #f0f2f5; }
+    th {
+      background: #f0f2f5;
+      text-align: left;
+    }
 
+    tr:hover {
+      background: #f9fafb;
+    }
+
+    /* STATUS BADGE */
     .badge {
       padding: 4px 8px;
       border-radius: 999px;
@@ -47,10 +75,29 @@
       font-size: 12px;
     }
 
-    .Hot { background: red; }
-    .Warm { background: orange; }
-    .Cold { background: blue; }
+    .Hot { background: #dc2626; }
+    .Warm { background: #f59e0b; }
+    .Cold { background: #3b82f6; }
 
+    /* AI TAG */
+    .ai-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: #6b7280;
+      font-style: italic;
+      background: #f3f4f6;
+      padding: 3px 8px;
+      border-radius: 8px;
+      margin-bottom: 4px;
+    }
+
+    .ai-icon {
+      font-size: 12px;
+    }
+
+    /* BUTTON */
     button {
       padding: 6px 10px;
       border: none;
@@ -60,26 +107,49 @@
       cursor: pointer;
     }
 
-    .section { margin-bottom: 30px; }
+    .section {
+      margin-bottom: 30px;
+    }
+
+    a {
+      text-decoration: none;
+      color: #2563eb;
+    }
+
   </style>
 </head>
 
 <body>
 
-<h1>CRM Dashboard</h1>
+<h1>🤖 AI CRM Dashboard</h1>
 
-<!-- 🔹 SUMMARY CARDS -->
+<!-- 🔹 SUMMARY -->
 <div class="cards">
-  <div class="card"><h3>Total Leads</h3><p>{{ total_leads }}</p></div>
-  <div class="card"><h3>Hot Leads</h3><p>{{ hot_leads }}</p></div>
-  <div class="card"><h3>Warm Leads</h3><p>{{ warm_leads }}</p></div>
-  <div class="card"><h3>Cold Leads</h3><p>{{ cold_leads }}</p></div>
-  <div class="card"><h3>Avg Score</h3><p>{{ avg_score }}</p></div>
+  <div class="card">
+    <h3>Total Leads</h3>
+    <p>{{ total_leads }}</p>
+  </div>
+  <div class="card">
+    <h3>Hot Leads</h3>
+    <p>{{ hot_leads }}</p>
+  </div>
+  <div class="card">
+    <h3>Warm Leads</h3>
+    <p>{{ warm_leads }}</p>
+  </div>
+  <div class="card">
+    <h3>Cold Leads</h3>
+    <p>{{ cold_leads }}</p>
+  </div>
+  <div class="card">
+    <h3>Avg Score</h3>
+    <p>{{ avg_score }}</p>
+  </div>
 </div>
 
 <!-- 🔹 NEEDS ACTION -->
 <div class="section">
-<h2>Leads Needing Action</h2>
+<h2>⚡ Leads Needing Action</h2>
 
 <table>
 <tr>
@@ -95,9 +165,24 @@
 <tr>
 <td><a href="/lead/{{ lead.id }}">{{ lead.name }}</a></td>
 <td>{{ lead.company }}</td>
-<td><span class="badge {{ lead.status }}">{{ lead.status }}</span></td>
-<td>{{ lead.score }}</td>
-<td>{{ lead.next_action }}</td>
+
+<td>
+  <span class="badge {{ lead.status }}">{{ lead.status }}</span>
+</td>
+
+<td>
+  <div class="ai-tag">
+    <span class="ai-icon">🤖</span> AI Score
+  </div>
+  <strong>{{ lead.score }}</strong>
+</td>
+
+<td>
+  <div class="ai-tag">
+    <span class="ai-icon">⚡</span> AI Action
+  </div>
+  {{ lead.next_action }}
+</td>
 
 <td>
 <form method="POST" action="/run-action/{{ lead.id }}">
@@ -107,12 +192,13 @@
 
 </tr>
 {% endfor %}
+
 </table>
 </div>
 
 <!-- 🔹 ALL LEADS -->
 <div class="section">
-<h2>All Leads</h2>
+<h2>📋 All Leads</h2>
 
 <table>
 <tr>
@@ -127,13 +213,31 @@
 
 {% for lead in leads %}
 <tr>
+
 <td><a href="/lead/{{ lead.id }}">{{ lead.name }}</a></td>
 <td>{{ lead.company }}</td>
 <td>{{ lead.email }}</td>
-<td><span class="badge {{ lead.status }}">{{ lead.status }}</span></td>
-<td>{{ lead.score }}</td>
+
+<td>
+  <span class="badge {{ lead.status }}">{{ lead.status }}</span>
+</td>
+
+<td>
+  <div class="ai-tag">
+    <span class="ai-icon">🤖</span> AI
+  </div>
+  {{ lead.score }}
+</td>
+
 <td>{{ lead.priority }}</td>
-<td>{{ lead.next_action }}</td>
+
+<td>
+  <div class="ai-tag">
+    <span class="ai-icon">⚡</span>
+  </div>
+  {{ lead.next_action }}
+</td>
+
 </tr>
 {% endfor %}
 
@@ -141,4 +245,4 @@
 </div>
 
 </body>
-</html>
+</html> 
