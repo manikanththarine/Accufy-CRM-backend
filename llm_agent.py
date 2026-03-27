@@ -4,10 +4,11 @@ import requests
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+
 def _fallback_result(reason="OpenAI failed"):
     return {
         "intent": "Interested lead",
-        "score": 60,
+        "score": 61,
         "priority": "medium",
         "status": "Warm",
         "reason": reason,
@@ -22,6 +23,21 @@ def _fallback_result(reason="OpenAI failed"):
     }
 
 
+def _parse_json_safely(text_output: str):
+    text_output = text_output.strip()
+
+    if text_output.startswith("```"):
+        text_output = text_output.replace("```json", "").replace("```", "").strip()
+
+    start = text_output.find("{")
+    end = text_output.rfind("}")
+
+    if start != -1 and end != -1 and end > start:
+        text_output = text_output[start:end + 1]
+
+    return json.loads(text_output)
+
+
 def analyze_with_openai(text):
     if not OPENAI_API_KEY:
         return _fallback_result("OPENAI_API_KEY missing")
@@ -33,50 +49,73 @@ You are a CRM AI assistant.
 
 Your job is to score a lead based on BUSINESS INTEREST LEVEL, not keywords.
 
-Analyze the message and return JSON:
+Analyze the message and return ONLY valid JSON in this exact format:
 
 {{
-  "intent": "...",
-  "score": number,
-  "priority": "...",
-  "status": "...",
-  "reason": "...",
-  "next_action": "...",
-  "next_action_type": "..."
+  "intent": "High purchase intent | Requested quotation | Interested lead | Just exploring | Not interested lead",
+  "score": 0,
+  "priority": "high | medium | low",
+  "status": "Hot | Warm | Cold",
+  "reason": "short explanation",
+  "reply_message": "professional client-friendly email body",
+  "email_subject": "professional email subject",
+  "followup_days": 0,
+  "task_title": "short task title",
+  "task_description": "short task description",
+  "next_action": "human readable next step",
+  "next_action_type": "send_pricing | schedule_demo | send_followup | close_lead | manual_review",
+  "auto_reply": true
 }}
 
-Scoring Rules:
+Scoring rules:
+- Score must be between 10 and 100
+- DO NOT use fixed numbers like 60, 90, 50
+- Generate a realistic score based on actual intensity of interest
+- Score should vary naturally, such as 63, 75, 88, 91, 97, etc.
+- Avoid rounded numbers unless strongly justified by the message
+- Consider urgency, clarity, seriousness, buying readiness, and business intent strength
 
-HIGH INTEREST (85–95):
-- Asking for pricing, quotation, cost
-- Asking for demo or meeting
-- Asking for proposal or timeline
-- Comparing vendors
-- Ready to proceed
+Interest guidelines:
 
-MEDIUM INTEREST (60–80):
-- Asking for product details
-- Wants to understand features
-- Exploring options
+VERY HIGH INTEREST (85–100):
+- Explicit purchase intent
+- Asking for quotation, pricing, commercial proposal, contract, implementation timeline
+- Ready to proceed / urgent requirement / comparing vendors seriously
 
-LOW INTEREST (30–55):
-- Vague or unclear message
-- Just browsing
-- No clear intent
+HIGH-MEDIUM INTEREST (70–84):
+- Strong interest but not finalized
+- Asking for demo, proposal, comparison, next steps, detailed discussion
 
-NO INTEREST (10–25):
-- Not interested
-- Rejecting
+MEDIUM INTEREST (55–69):
+- General interest
+- Asking about product details, features, use cases, capabilities
 
-IMPORTANT:
-- Understand meaning, not keywords
-- Pricing = HIGH score
-- Demo = HIGH score
-- Return only JSON
+LOW INTEREST (30–54):
+- Weak, vague, or exploratory message
+- No clear next step or buying signal
+
+VERY LOW INTEREST (10–29):
+- No interest
+- Rejection
+- Not relevant
+
+Important:
+- Understand business meaning, not just keywords
+- Pricing / quotation / commercial request should usually be high interest
+- Demo request should usually be high-medium or very high depending on seriousness
+- Set priority:
+  - high if score >= 80
+  - medium if score >= 50 and < 80
+  - low if score < 50
+- Set status:
+  - Hot if score >= 80
+  - Warm if score >= 50 and < 80
+  - Cold if score < 50
+- Return JSON only, with no markdown and no extra text
 
 Lead message:
 {text}
-"""
+""".strip()
 
     try:
         response = requests.post(
@@ -96,13 +135,13 @@ Lead message:
         print("OpenAI raw response:", response.text)
 
         if response.status_code != 200:
-            return _fallback_result(f"OpenAI failed with status {response.status_code}: {response.text[:200]}")
+            return _fallback_result(
+                f"OpenAI failed with status {response.status_code}: {response.text[:200]}"
+            )
 
         data = response.json()
-
         text_output = ""
 
-        # Robust extraction for Responses API
         for item in data.get("output", []):
             if item.get("type") == "message":
                 for content in item.get("content", []):
@@ -110,7 +149,6 @@ Lead message:
                         text_output += content.get("text", "")
 
         if not text_output:
-            # backup extraction
             text_output = data.get("output_text", "")
 
         print("OpenAI extracted text:", text_output)
@@ -118,19 +156,24 @@ Lead message:
         if not text_output.strip():
             return _fallback_result("OpenAI returned empty text output")
 
-        result = json.loads(text_output)
+        result = _parse_json_safely(text_output)
 
         return {
             "intent": result.get("intent", "Interested lead"),
-            "score": int(result.get("score", 60)),
+            "score": int(result.get("score", 61)),
             "priority": result.get("priority", "medium"),
             "status": result.get("status", "Warm"),
             "reason": result.get("reason", "Lead submitted form"),
-            "reply_message": result.get("reply_message", "Thank you for your interest. We will get back to you shortly."),
+            "reply_message": result.get(
+                "reply_message",
+                "Thank you for your interest. We will get back to you shortly.",
+            ),
             "email_subject": result.get("email_subject", "Thanks for reaching out"),
             "followup_days": int(result.get("followup_days", 3)),
             "task_title": result.get("task_title", "Follow up with lead"),
-            "task_description": result.get("task_description", "Review lead and continue conversation"),
+            "task_description": result.get(
+                "task_description", "Review lead and continue conversation"
+            ),
             "next_action": result.get("next_action", "Send follow-up"),
             "next_action_type": result.get("next_action_type", "send_followup"),
             "auto_reply": bool(result.get("auto_reply", True)),
