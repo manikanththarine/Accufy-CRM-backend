@@ -4,22 +4,26 @@
   <meta charset="UTF-8">
   <title>CRM Dashboard</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 24px; background: #f7f8fa; }
+    body { font-family: Arial; margin: 24px; background: #f7f8fa; }
     h1, h2 { margin-bottom: 12px; }
+
     .cards {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
       gap: 16px;
       margin-bottom: 28px;
     }
+
     .card {
       background: white;
       padding: 18px;
       border-radius: 12px;
       box-shadow: 0 1px 6px rgba(0,0,0,0.08);
     }
-    .card h3 { margin: 0 0 8px; font-size: 14px; color: #666; }
-    .card p { margin: 0; font-size: 24px; font-weight: bold; }
+
+    .card h3 { font-size: 14px; color: #666; }
+    .card p { font-size: 22px; font-weight: bold; }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -27,127 +31,114 @@
       border-radius: 12px;
       overflow: hidden;
       box-shadow: 0 1px 6px rgba(0,0,0,0.08);
-      margin-bottom: 28px;
     }
+
     th, td {
-      padding: 12px;
+      padding: 10px;
       border-bottom: 1px solid #eee;
-      text-align: left;
-      font-size: 14px;
     }
+
     th { background: #f0f2f5; }
-    .section {
-      margin-bottom: 28px;
-    }
+
     .badge {
-      padding: 5px 10px;
+      padding: 4px 8px;
       border-radius: 999px;
-      font-size: 12px;
       color: white;
-      display: inline-block;
+      font-size: 12px;
     }
-    .Hot { background: #d9534f; }
-    .Warm { background: #f0ad4e; }
-    .Cold { background: #5bc0de; }
+
+    .Hot { background: red; }
+    .Warm { background: orange; }
+    .Cold { background: blue; }
+
     button {
-      padding: 8px 12px;
+      padding: 6px 10px;
       border: none;
-      border-radius: 8px;
-      background: #111827;
+      border-radius: 6px;
+      background: black;
       color: white;
       cursor: pointer;
     }
-    a { text-decoration: none; color: #2563eb; }
+
+    .section { margin-bottom: 30px; }
   </style>
 </head>
+
 <body>
 
-  <h1>CRM Dashboard</h1>
+<h1>CRM Dashboard</h1>
 
-  <div class="cards">
-    <div class="card">
-      <h3>Total Leads</h3>
-      <p>{{ total_leads }}</p>
-    </div>
-    <div class="card">
-      <h3>Hot Leads</h3>
-      <p>{{ hot_leads }}</p>
-    </div>
-    <div class="card">
-      <h3>Warm Leads</h3>
-      <p>{{ warm_leads }}</p>
-    </div>
-    <div class="card">
-      <h3>Cold Leads</h3>
-      <p>{{ cold_leads }}</p>
-    </div>
-    <div class="card">
-      <h3>Avg Score</h3>
-      <p>{{ avg_score }}</p>
-    </div>
-  </div>
+<!-- 🔹 SUMMARY CARDS -->
+<div class="cards">
+  <div class="card"><h3>Total Leads</h3><p>{{ total_leads }}</p></div>
+  <div class="card"><h3>Hot Leads</h3><p>{{ hot_leads }}</p></div>
+  <div class="card"><h3>Warm Leads</h3><p>{{ warm_leads }}</p></div>
+  <div class="card"><h3>Cold Leads</h3><p>{{ cold_leads }}</p></div>
+  <div class="card"><h3>Avg Score</h3><p>{{ avg_score }}</p></div>
+</div>
 
-  <div class="section">
-    <h2>Leads Needing Action</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Company</th>
-          <th>Status</th>
-          <th>Score</th>
-          <th>Next Action</th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for lead in needs_action %}
-        <tr>
-          <td><a href="/lead/{{ lead.id }}">{{ lead.name }}</a></td>
-          <td>{{ lead.company }}</td>
-          <td><span class="badge {{ lead.status }}">{{ lead.status }}</span></td>
-          <td>{{ lead.score }}</td>
-          <td>{{ lead.next_action }}</td>
-          <td>
-            <form method="POST" action="/run-action/{{ lead.id }}">
-              <button type="submit">Run Action</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+<!-- 🔹 NEEDS ACTION -->
+<div class="section">
+<h2>Leads Needing Action</h2>
 
-  <div class="section">
-    <h2>All Leads</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Company</th>
-          <th>Email</th>
-          <th>Status</th>
-          <th>Score</th>
-          <th>Priority</th>
-          <th>Next Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for lead in leads %}
-        <tr>
-          <td><a href="/lead/{{ lead.id }}">{{ lead.name }}</a></td>
-          <td>{{ lead.company }}</td>
-          <td>{{ lead.email }}</td>
-          <td><span class="badge {{ lead.status }}">{{ lead.status }}</span></td>
-          <td>{{ lead.score }}</td>
-          <td>{{ lead.priority }}</td>
-          <td>{{ lead.next_action }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+<table>
+<tr>
+<th>Name</th>
+<th>Company</th>
+<th>Status</th>
+<th>Score</th>
+<th>Next Action</th>
+<th>Run</th>
+</tr>
+
+{% for lead in needs_action %}
+<tr>
+<td><a href="/lead/{{ lead.id }}">{{ lead.name }}</a></td>
+<td>{{ lead.company }}</td>
+<td><span class="badge {{ lead.status }}">{{ lead.status }}</span></td>
+<td>{{ lead.score }}</td>
+<td>{{ lead.next_action }}</td>
+
+<td>
+<form method="POST" action="/run-action/{{ lead.id }}">
+<button>Run</button>
+</form>
+</td>
+
+</tr>
+{% endfor %}
+</table>
+</div>
+
+<!-- 🔹 ALL LEADS -->
+<div class="section">
+<h2>All Leads</h2>
+
+<table>
+<tr>
+<th>Name</th>
+<th>Company</th>
+<th>Email</th>
+<th>Status</th>
+<th>Score</th>
+<th>Priority</th>
+<th>Next Action</th>
+</tr>
+
+{% for lead in leads %}
+<tr>
+<td><a href="/lead/{{ lead.id }}">{{ lead.name }}</a></td>
+<td>{{ lead.company }}</td>
+<td>{{ lead.email }}</td>
+<td><span class="badge {{ lead.status }}">{{ lead.status }}</span></td>
+<td>{{ lead.score }}</td>
+<td>{{ lead.priority }}</td>
+<td>{{ lead.next_action }}</td>
+</tr>
+{% endfor %}
+
+</table>
+</div>
 
 </body>
 </html>

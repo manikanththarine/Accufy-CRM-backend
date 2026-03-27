@@ -89,8 +89,7 @@ def dashboard():
             recent_leads=recent_leads,
         )
     except Exception as e:
-        return f"Error loading dashboard: {str(e)}", 500
-
+        return f"Error loading dashboard: {str(e)}", 500 
 
 @app.route("/lead/<int:lead_id>", methods=["GET"])
 def lead_detail(lead_id: int):
