@@ -1,44 +1,37 @@
 import os
-import json
 import requests
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 def analyze_with_openai(text):
+
     url = "https://api.openai.com/v1/responses"
 
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     prompt = f"""
-You are a smart CRM AI assistant.
+    Analyze this lead and return JSON only:
 
-Understand the BUSINESS INTENT of the message.
+    Lead: {text}
 
-Message:
-{text}
-
-Return ONLY JSON:
-
-{{
-  "intent": "High purchase intent | Interested lead | Not interested",
-  "score": number,
-  "priority": "high | medium | low",
-  "status": "Hot | Warm | Cold",
-  "next_action": "text",
-  "next_action_type": "send_pricing | schedule_demo | send_followup | close_lead"
-}}
-
-Rules:
-- Asking price/quote/cost → HIGH (85–95)
-- Asking demo/details → MEDIUM (60–75)
-- Rejecting → LOW (10–35)
-- Think like sales expert, not keyword matcher
-"""
+    Return format:
+    {{
+        "intent": "...",
+        "score": number,
+        "priority": "...",
+        "status": "...",
+        "reason": "...",
+        "next_action": "...",
+        "next_action_type": "..."
+    }}
+    """
 
     response = requests.post(
         url,
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        },
+        headers=headers,
         json={
             "model": "gpt-4.1-mini",
             "input": prompt
@@ -46,14 +39,36 @@ Rules:
         timeout=60
     )
 
-    data = response.json()
+    print("OpenAI status:", response.status_code)
+    print("OpenAI response:", response.text)
 
-    # extract output text
-    output_text = ""
-    for item in data.get("output", []):
-        if item.get("type") == "message":
-            for c in item.get("content", []):
-                if c.get("type") == "output_text":
-                    output_text += c.get("text", "")
+    if response.status_code != 200:
+        return {
+            "intent": "Error",
+            "score": 50,
+            "priority": "medium",
+            "status": "Warm",
+            "reason": "OpenAI failed",
+            "next_action": "Manual review",
+            "next_action_type": "manual"
+        }
 
-    return json.loads(output_text)
+    try:
+        output = response.json()
+        text_output = output["output"][0]["content"][0]["text"]
+
+        import json
+        return json.loads(text_output)
+
+    except Exception as e:
+        print("Parsing error:", e)
+
+        return {
+            "intent": "Fallback",
+            "score": 60,
+            "priority": "medium",
+            "status": "Warm",
+            "reason": "Parsing failed",
+            "next_action": "Follow up manually",
+            "next_action_type": "manual"
+        }
