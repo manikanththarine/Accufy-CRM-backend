@@ -6,7 +6,7 @@ from llm_agent import analyze_with_openai
 from dotenv import load_dotenv
 from flask import Flask, request, render_template, redirect, url_for, jsonify
 
-from llm_agent import analyze_lead_with_llm, analyze_reply_action
+from llm_agent import analyze_with_openai
 from email_sender import send_email
 from supabase_db import (
     insert_lead,
