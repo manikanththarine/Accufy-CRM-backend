@@ -42,13 +42,9 @@ def create_initial_task(lead_id: int, analysis: dict, company: str):
         "title": analysis.get("task_title", "Follow up with lead"),
         "description": analysis.get(
             "task_description",
-            f"Follow up with lead from {company}."
+            f"Follow up with lead {lead_id}"
         ),
         "status": "open",
-        "priority": analysis.get("priority", "medium"),
-        "due_at": None,
-        "created_by": "ai",
-        "assigned_to": "Sales Team",
     })
 
 
