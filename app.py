@@ -365,7 +365,6 @@ def api_create_lead():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-@app.route("/api/leads/<int:lead_id>", methods=
 
 @app.route("/api/leads/<int:lead_id>", methods=["GET"])
 def api_get_lead(lead_id):
