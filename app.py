@@ -388,7 +388,24 @@ def api_get_lead(lead_id):
             return jsonify({"error": "Lead not found"}), 404
         return jsonify(lead), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500 
+        return jsonify({"error": str(e)}), 500
+    
+@app.route("/api/leads/<int:lead_id>/tasks", methods=["GET"])
+def api_get_tasks_by_lead_route(lead_id):
+    try:
+        lead = get_lead_by_id(lead_id)
+        if not lead:
+            return jsonify({"error": "Lead not found"}), 404
+
+        tasks = get_tasks_by_lead(lead_id)
+        return jsonify({
+            "lead_id": lead_id,
+            "count": len(tasks),
+            "tasks": tasks
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500  
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
