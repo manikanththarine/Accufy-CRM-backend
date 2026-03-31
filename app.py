@@ -295,71 +295,6 @@ def run_action(lead_id: int):
 
     except Exception as e:
         return f"Error running action: {str(e)}", 500
-@app.route("/api/leads", methods=["POST"])
-def api_create_lead():
-    try:
-        data = request.get_json()
-
-        if not data:
-            return jsonify({"error": "Invalid or missing JSON body"}), 400
-
-        name = (data.get("name") or "").strip()
-        company = (data.get("company") or "").strip()
-        job_title = (data.get("job_title") or "").strip()
-        email = (data.get("email") or "").strip()
-        source = (data.get("source") or "API").strip()
-        description = (data.get("description") or "").strip()
-
-        analysis = analyze_lead_with_llm(description)
-
-        lead_data = {
-            "name": name or None,
-            "company": company or "Unknown Company",
-            "job_title": job_title or None,
-            "email": email or None,
-            "source": source,
-            "description": description or None,
-            "intent": analysis.get("intent", "Interested lead"),
-            "score": int(analysis.get("score", 60)),
-            "priority": analysis.get("priority", "medium"),
-            "reason": analysis.get("reason", "Lead submitted via API"),
-            "status": analysis.get("status", "Warm"),
-            "email_subject": analysis.get("email_subject", "Thanks for reaching out"),
-            "email_body": analysis.get("reply_message", "Thank you for contacting us."),
-            "next_action": analysis.get("next_action", "Send follow-up"),
-            "next_action_type": analysis.get("next_action_type", "send_followup"),
-            "followup": (
-                datetime.now(timezone.utc)
-                + timedelta(days=int(analysis.get("followup_days", 3)))
-            ).isoformat(),
-            "created_at": utc_now_iso(),
-            "updated_at": utc_now_iso(),
-        }
-
-        inserted = insert_lead(lead_data)
-        lead = inserted[0] if isinstance(inserted, list) else inserted
-        lead_id = lead["id"]
-
-        create_initial_task(lead_id, analysis, company or "Unknown Company")
-
-        if email:
-            send_email(
-                to_email=email,
-                subject=analysis.get("email_subject", "Thanks for reaching out"),
-                body=analysis.get("reply_message", "Thank you for contacting us."),
-                lead_id=lead_id,
-            )
-
-        return jsonify({
-            "message": "Lead created successfully",
-            "lead_id": lead_id,
-            "lead": lead
-        }), 201
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/leads", methods=["GET"])
 def api_get_all_leads():
     try:
@@ -441,7 +376,6 @@ def api_create_lead():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/leads", methods=["GET"])
 def api_get_all_leads():
