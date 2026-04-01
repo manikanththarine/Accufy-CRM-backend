@@ -32,8 +32,6 @@ def extract_lead_id_from_address(address_text: str):
     if match:
         return int(match.group(1))
     return None
-
-
 def create_initial_task(lead_id: int, analysis: dict, company: str):
     insert_task({
         "lead_id": lead_id,
@@ -44,16 +42,13 @@ def create_initial_task(lead_id: int, analysis: dict, company: str):
         ),
         "status": "open"
     })
-
 @app.route("/", methods=["GET"])
 def home():
     return render_template("form.html")
 
-
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
-
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
@@ -229,7 +224,6 @@ def inbound_email():
     except Exception as e:
         print("INBOUND ERROR:", str(e))
         return f"Error: {str(e)}", 500
-
 
 @app.route("/run-action/<int:lead_id>", methods=["POST"])
 def run_action(lead_id: int):
