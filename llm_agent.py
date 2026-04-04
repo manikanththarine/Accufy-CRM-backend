@@ -8,7 +8,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 def _fallback_result(reason="OpenAI failed"):
     return {
         "intent": "Interested lead",
-        "score": 61,
+        "score": 60,
         "priority": "medium",
         "status": "Warm",
         "reason": reason,
