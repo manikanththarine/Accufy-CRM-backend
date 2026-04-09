@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from flask import Flask, request, render_template, redirect, url_for, jsonify
-
+from flask_cors import CORS # 1. ADD THIS IMPORT
 from llm_agent import analyze_lead_with_llm, analyze_reply_action
 from email_sender import send_email
 from supabase_db import (
@@ -21,6 +21,9 @@ from supabase_db import (
 load_dotenv()
 app = Flask(__name__)
 
+
+
+CORS(app) # 2. ADD THIS LINE TO ENABLE CORS
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -45,14 +48,26 @@ def create_initial_task(lead_id: int, analysis: dict, company: str):
         "status": "open"
     })
 
-@app.route("/", methods=["GET"])
-def home():
-    return render_template("form.html")
+# @app.route("/", methods=["GET"])
+# def home():
+#     return render_template("form.html")
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
 
+@app.route("/api/dashboard-stats", methods=["GET"])
+def api_dashboard_stats():
+    leads = get_all_leads()
+    
+    return jsonify({
+        "total_leads": len(leads),
+        "leads": leads,
+        "hot_leads": len([l for l in leads if l.get("status") == "Hot"]),
+        "warm_leads": len([l for l in leads if l.get("status") == "Warm"]),
+        "cold_leads": len([l for l in leads if l.get("status") == "Cold"]),
+        "avg_score": round(sum([int(l.get("score", 0)) for l in leads]) / len(leads), 1) if leads else 0
+    }), 200
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
     try:
@@ -102,21 +117,35 @@ def lead_detail(lead_id: int):
     except Exception as e:
         return f"Error loading lead detail: {str(e)}", 500
 
-@app.route("/submit", methods=["GET", "POST"])
+@app.route("/submit", methods=["POST"])
 def submit_lead():
-    if request.method == "GET":
-        return redirect(url_for("home"))
-
+    # if request.method == "GET":
+    #     return redirect(url_for("home"))
     try:
-        name = request.form.get("name", "").strip()
-        company = request.form.get("company", "").strip()
-        job_title = request.form.get("job_title", "").strip()
-        email = request.form.get("email", "").strip()
-        source = request.form.get("source", "Website").strip()
-        description = request.form.get("description", "").strip()
+        data = request.get_json() 
+    
+    # Handle cases where the request body might be empty or not JSON
+        if not data:
+            return jsonify({"error": "Missing JSON body"}), 400
 
+    # 2. Access the dictionary keys
+        name = data.get("name", "").strip()
+        company = data.get("company", "").strip()
+        job_title = data.get("job_title", "").strip()
+        email = data.get("email", "").strip()
+        source = data.get("source", "Website").strip()
+        description = data.get("description", "").strip()
+
+        print("Received lead submission:", {
+            "name": name,
+            "company": company,
+            "job_title": job_title,
+            "email": email,
+            "source": source,
+            "description": description
+        })
         analysis = analyze_lead_with_llm(
-            description,
+                description,
             company=company,
             email=email,
             job_title=job_title,
@@ -162,7 +191,6 @@ def submit_lead():
             "last_funding": analysis.get("lastFunding", "Unknown"),
             "linkedin": analysis.get("linkedin", None),
             "website": analysis.get("website", None),
-
             "followup": (
                 datetime.now(timezone.utc)
                 + timedelta(days=int(analysis.get("followup_days", 3)))
@@ -184,11 +212,15 @@ def submit_lead():
                 lead_id=lead_id,
             )
 
-        return redirect(url_for("dashboard"))
+        return jsonify({
+            "status": "success", 
+            "message": "Lead created", 
+            "lead_id": lead_id
+        }), 201
 
     except Exception as e:
         print("SUBMIT ERROR:", str(e))
-        return f"Error while submitting lead: {str(e)}", 500
+        return jsonify({"status": "error", "message": f"Error while submitting lead: {str(e)}"}), 500
 
 @app.route("/inbound-email", methods=["POST"])
 def inbound_email():
