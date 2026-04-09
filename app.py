@@ -16,6 +16,10 @@ from supabase_db import (
     insert_task,
     insert_message,
     update_lead,
+    create_user,
+    verify_user_credentials, 
+    get_user_by_email,
+    update_user_password
 )
 
 load_dotenv()
@@ -51,7 +55,94 @@ def create_initial_task(lead_id: int, analysis: dict, company: str):
 # @app.route("/", methods=["GET"])
 # def home():
 #     return render_template("form.html")
+@app.route('/api/signup', methods=['POST'])
+def signup():
+    data = request.json
+    try:
+        # Check if user already exists
+        if get_user_by_email(data.get('email')):
+            return jsonify({"status": "error", "message": "Email already registered"}), 400
+        
+        create_user(data)
+        return jsonify({"status": "success", "message": "User created"}), 201
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
+@app.route('/api/login', methods=['POST'])
+def login():
+    try:
+        data = request.json
+        email = data.get('email')
+        password = data.get('password')
 
+        if not email or not password:
+            return jsonify({"status": "error", "message": "Missing credentials"}), 400
+
+        # Use the helper to verify credentials
+        user = verify_user_credentials(email, password)
+        
+        if user:
+            # Check if account is active based on your model
+            if not user.get('isActive', True):
+                return jsonify({"status": "error", "message": "Account is disabled"}), 403
+                
+            return jsonify({
+                "status": "success",
+                "message": "Login successful",
+                "user": user
+            }), 200
+        else:
+            return jsonify({"status": "error", "message": "Invalid email or password"}), 401
+
+    except Exception as e:
+        print(f"LOGIN ERROR: {str(e)}")
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
+    
+@app.route('/api/forgot-password', methods=['PATCH'])
+def forgot_password():
+    data = request.json
+    email = data.get('email')
+    new_password = data.get('newPassword')
+    
+    user = get_user_by_email(email)
+    if not user:
+        return jsonify({"status": "error", "message": "User not found"}), 404
+        
+    update_user_password(email, new_password)
+    return jsonify({"status": "success", "message": "Password updated"}), 200
+@app.route('/api/update-lead-stage', methods=['PATCH'])
+def update_stage():
+    try:
+        data = request.json
+        lead_id = data.get('leadId')
+        new_stage = data.get('stage')
+        print(f"Received request to update Lead {lead_id} to stage {new_stage}")
+        if not lead_id or not new_stage:
+            return jsonify({"status": "error", "message": "Missing leadId or stage"}), 400
+
+        # Create the update dictionary
+        update_data = {
+            "stage": new_stage,
+            "updated_at": utc_now_iso() # Keeps your timestamps in sync
+        }
+
+        # Use your existing database helper function
+        # Note: lead_id might need to be cast to int if your DB expects it
+        update_lead(int(lead_id), update_data)
+        
+        print(f"Successfully updated Lead {lead_id} to stage {new_stage}")
+        return jsonify({
+            "status": "success", 
+            "message": f"Lead {lead_id} updated to {new_stage}"
+        }), 200
+
+    except Exception as e:
+        print(f"UPDATE STAGE ERROR: {str(e)}")
+        return jsonify({
+            "status": "error", 
+            "message": str(e)
+        }), 500
+    
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
