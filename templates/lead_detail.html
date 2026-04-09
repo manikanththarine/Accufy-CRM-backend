@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Lead Detail</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 30px; }
+    .box { border: 1px solid #ccc; padding: 16px; margin-bottom: 20px; }
+    h3 { margin-top: 0; }
+  </style>
+</head>
+<body>
+  <p><a href="/dashboard">← Back to Dashboard</a></p>
+
+  <div class="box">
+    <h3>Lead Info</h3>
+    <p><strong>Name:</strong> {{ lead.name }}</p>
+    <p><strong>Company:</strong> {{ lead.company }}</p>
+    <p><strong>Email:</strong> {{ lead.email }}</p>
+    <p><strong>Intent:</strong> {{ lead.intent }}</p>
+    <p><strong>Score:</strong> {{ lead.score }}</p>
+    <p><strong>Status:</strong> {{ lead.status }}</p>
+    <p><strong>Reason:</strong> {{ lead.reason }}</p>
+  </div>
+
+  <div class="box">
+    <h3>Messages</h3>
+    {% if messages %}
+      {% for msg in messages %}
+        <div style="border-bottom:1px solid #ddd; margin-bottom:12px; padding-bottom:12px;">
+          <p><strong>Direction:</strong> {{ msg.direction }}</p>
+          <p><strong>Subject:</strong> {{ msg.subject }}</p>
+          <p><strong>Sender:</strong> {{ msg.sender_email }}</p>
+          <p><strong>Body:</strong><br>{{ msg.body }}</p>
+          <p><strong>Created:</strong> {{ msg.created_at }}</p>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p>No messages yet.</p>
+    {% endif %}
+  </div>
+
+  <div class="box">
+    <h3>Tasks</h3>
+    {% if tasks %}
+      {% for task in tasks %}
+        <div style="border-bottom:1px solid #ddd; margin-bottom:12px; padding-bottom:12px;">
+          <p><strong>Title:</strong> {{ task.title }}</p>
+          <p><strong>Description:</strong> {{ task.description }}</p>
+          <p><strong>Status:</strong> {{ task.status }}</p>
+          <p><strong>Priority:</strong> {{ task.priority }}</p>
+          <p><strong>Assigned To:</strong> {{ task.assigned_to }}</p>
+          <p><strong>Created:</strong> {{ task.created_at }}</p>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p>No tasks yet.</p>
+    {% endif %}
+  </div>
+</body>
+</html>
