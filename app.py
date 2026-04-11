@@ -145,7 +145,7 @@ def api_signup():
                 "name": name,
                 "email": email,
                 "password": password,
-                "role": "user",
+                "role": "Admin",
                 "isActive": True,
             }
         )
@@ -158,9 +158,11 @@ def api_signup():
 @app.route("/api/login", methods=["POST"])
 def api_login():
     try:
+        
         data = request.get_json() or {}
         email = normalize_email(data.get("email"))
         password = (data.get("password") or "").strip()
+        print("Login attempt for email:", email)
 
         if not email or not password:
             return jsonify({"status": "error", "message": "email and password are required"}), 400
@@ -207,7 +209,7 @@ def submit_lead():
         company = (data.get("company") or "").strip()
         source = (data.get("source") or "manual").strip()
         description = (data.get("description") or "").strip()
-
+        print("Received lead submission:", name, email, company, source)
         if not name and not email and not company and not description:
             return jsonify({"status": "error", "message": "At least one lead field is required"}), 400
 
