@@ -1,113 +1,154 @@
-from gmail_reader import extract_companies_from_gmail
-from company_enrichment import enrich_company_profile
+from datetime import datetime, timezone
+
+from gmail_reader import get_gmail_service, list_all_messages, fetch_and_parse_message, extract_domain
+from company_enrichment import enrich_company_from_domain
+from supabase_db import (
+    get_gmail_connection,
+    upsert_account,
+    upsert_contact,
+    insert_account_email_activity,
+)
+
 from llm_agent import analyze_lead_with_llm
-from supabase_db import insert_lead, update_lead, find_lead_by_email, find_lead_by_website
 
 
-def build_lead_payload(gmail_item, enrichment, analysis):
-    company = enrichment.get("account") or enrichment.get("name") or gmail_item.get("domain")
-    score = int(analysis.get("score", 60))
-    lead_score = int(analysis.get("leadScore", score))
-
-    return {
-        "name": gmail_item.get("sender_name") or company,
-        "company": company,
-        "account": company,
-        "title": enrichment.get("title") or "New Business",
-        "job_title": None,
-        "email": gmail_item.get("sender_email"),
-        "phone": None,
-        "source": "Gmail",
-        "description": f"Subject: {gmail_item.get('subject', '')}\n\nBody:\n{(gmail_item.get('body') or '')[:3000]}",
-        "intent": analysis.get("intent", "Interested lead"),
-        "score": score,
-        "priority": analysis.get("priority", "medium"),
-        "reason": analysis.get("reason", "Lead discovered from Gmail"),
-        "status": analysis.get("status", enrichment.get("status", "New")),
-        "stage": analysis.get("stage", enrichment.get("stage", "Lead")),
-        "amount": analysis.get("amount", enrichment.get("amount")),
-        "revenue": enrichment.get("revenue", "Unknown"),
-        "headcount": enrichment.get("headcount", "Unknown"),
-        "industry": enrichment.get("industry", "Unknown"),
-        "lead_score": lead_score,
-        "ai_next_action": analysis.get("aiNextAction", "Review and qualify lead"),
-        "next_action": analysis.get("next_action", "Review and qualify lead"),
-        "next_action_type": analysis.get("next_action_type", "manual_review"),
-        "owner": analysis.get("owner", enrichment.get("owner", "Unassigned")),
-        "account_icon": enrichment.get("accountIcon"),
-        "icon": enrichment.get("icon"),
-        "last_interaction": "Just now",
-        "last_funding": enrichment.get("lastFunding", "Unknown"),
-        "linkedin": enrichment.get("linkedin"),
-        "website": enrichment.get("website"),
-        "logo": enrichment.get("logo"),
-        "email_subject": "",
-        "email_body": "",
-    }
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def sync_gmail_companies_to_supabase(max_results=20):
-    gmail_companies = extract_companies_from_gmail(max_results=max_results)
+def _ms_to_iso(ms_value):
+    if not ms_value:
+        return utc_now_iso()
+    try:
+        ts = int(ms_value) / 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    except Exception:
+        return utc_now_iso()
 
-    inserted = 0
-    updated = 0
 
-    for item in gmail_companies:
-        sender_email = item.get("sender_email")
-        domain = item.get("domain")
+def score_email_with_ai(subject: str, snippet: str, sender_email: str, company_name: str):
+    text = f"""
+    Sender: {sender_email}
+    Company: {company_name}
+    Subject: {subject or ''}
+    Message: {snippet or ''}
+    """
+    try:
+        result = analyze_lead_with_llm(text)
+        return {
+            "lead_score": result.get("score"),
+            "priority": result.get("priority"),
+            "status": result.get("status"),
+            "ai_next_action": result.get("next_action"),
+            "reason": result.get("reason"),
+        }
+    except Exception:
+        return {
+            "lead_score": 50,
+            "priority": "medium",
+            "status": "Warm",
+            "ai_next_action": "Manual review",
+            "reason": "AI scoring fallback used during Gmail sync",
+        }
 
-        enrichment = enrich_company_profile(company_name=domain, email=sender_email)
 
-        ai_text = f"""
-Lead source: Gmail
-Sender: {item.get('sender_name') or 'Unknown'}
-Sender email: {sender_email or 'Unknown'}
-Domain: {domain or 'Unknown'}
-Subject: {item.get('subject') or ''}
-Body:
-{item.get('body') or ''}
+def sync_gmail_accounts_for_user(crm_user_email: str, max_pages: int = 20) -> dict:
+    connection = get_gmail_connection(crm_user_email)
+    if not connection:
+        raise ValueError("Gmail not connected for this CRM user")
 
-Company details:
-Company: {enrichment.get('account') or enrichment.get('name') or 'Unknown'}
-Industry: {enrichment.get('industry') or 'Unknown'}
-Revenue: {enrichment.get('revenue') or 'Unknown'}
-Headcount: {enrichment.get('headcount') or 'Unknown'}
-LinkedIn: {enrichment.get('linkedin') or 'Unknown'}
-Website: {enrichment.get('website') or 'Unknown'}
-""".strip()
+    refresh_token = connection.get("refresh_token")
+    if not refresh_token:
+        raise ValueError("Refresh token not found for this CRM user")
 
-        analysis = analyze_lead_with_llm(
-            text=ai_text,
-            company=enrichment.get("account") or domain,
-            email=sender_email,
-            job_title=None,
-            enrichment=enrichment,
+    service = get_gmail_service(refresh_token)
+    messages = list_all_messages(service, label_ids=["INBOX"], max_pages=max_pages)
+
+    processed = 0
+    skipped = 0
+    accounts_updated = 0
+
+    for msg in messages:
+        parsed = fetch_and_parse_message(service, msg["id"])
+        sender_email = parsed.get("sender_email")
+        sender_name = parsed.get("sender_name")
+        domain = extract_domain(sender_email)
+
+        if not sender_email or not domain:
+            skipped += 1
+            continue
+
+        processed += 1
+
+        enriched = enrich_company_from_domain(domain)
+        company_name = enriched.get("company_name") or domain.split(".")[0].title()
+        received_at_iso = _ms_to_iso(parsed.get("received_at_unix_ms"))
+
+        ai = score_email_with_ai(
+            subject=parsed.get("subject"),
+            snippet=parsed.get("snippet"),
+            sender_email=sender_email,
+            company_name=company_name,
         )
 
-        payload = build_lead_payload(item, enrichment, analysis)
+        account = upsert_account(
+            {
+                "company_name": company_name,
+                "domain": domain,
+                "icon": enriched.get("icon") or company_name[:1].upper(),
+                "industry": enriched.get("industry"),
+                "revenue": enriched.get("revenue"),
+                "headcount": enriched.get("headcount"),
+                "last_funding": enriched.get("last_funding"),
+                "linkedin": enriched.get("linkedin"),
+                "website": enriched.get("website") or f"https://{domain}",
+                "owner": "Unassigned",
+                "source": "gmail_apollo",
+                "last_interaction": received_at_iso,
+                "apollo_status": enriched.get("apollo_status", "pending"),
+                "lead_score": ai.get("lead_score"),
+                "priority": ai.get("priority"),
+                "status": ai.get("status"),
+                "ai_next_action": ai.get("ai_next_action"),
+                "reason": ai.get("reason"),
+                "updated_at": utc_now_iso(),
+            }
+        )
 
-        existing = None
-        if sender_email:
-            existing = find_lead_by_email(sender_email)
-        if not existing and enrichment.get("website"):
-            existing = find_lead_by_website(enrichment.get("website"))
+        if not account:
+            continue
 
-        if existing:
-            update_lead(existing["id"], payload)
-            updated += 1
-            print("Updated:", company)
-        else:
-            insert_lead(payload)
-            inserted += 1
-            print("Inserted:", company)
+        upsert_contact(
+            {
+                "account_id": account["id"],
+                "name": sender_name,
+                "email": sender_email,
+                "title": None,
+                "linkedin": None,
+                "source": "gmail",
+                "updated_at": utc_now_iso(),
+            }
+        )
+
+        insert_account_email_activity(
+            {
+                "account_id": account["id"],
+                "sender_email": sender_email,
+                "subject": parsed.get("subject"),
+                "snippet": parsed.get("snippet"),
+                "received_at": received_at_iso,
+                "thread_id": parsed.get("thread_id"),
+                "gmail_message_id": parsed.get("gmail_message_id"),
+            }
+        )
+
+        accounts_updated += 1
 
     return {
-        "inserted": inserted,
-        "updated": updated,
-        "total_processed": len(gmail_companies),
-    }
-
-
-if __name__ == "__main__":
-    result = sync_gmail_companies_to_supabase(max_results=10)
-    print(result) 
+        "status": "success",
+        "crm_user_email": crm_user_email,
+        "google_email": connection.get("google_email"),
+        "processed_company_emails": processed,
+        "skipped_non_company_emails": skipped,
+        "accounts_updated": accounts_updated,
+    } 

@@ -1,646 +1,520 @@
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
+import requests
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template, request, url_for
-from flask import CORS # cors added
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-from company_enrichment import enrich_company_profile
-from email_sender import send_email
 from llm_agent import analyze_lead_with_llm, analyze_reply_action
+from email_sender import send_email
 from supabase_db import (
+    insert_lead,
     get_all_leads,
     get_lead_by_id,
     get_messages_by_lead,
     get_tasks_by_lead,
-    insert_lead,
-    insert_message,
     insert_task,
+    insert_message,
     update_lead,
+    create_user,
+    verify_user_credentials,
+    get_user_by_email,
+    update_user_password,
+    save_gmail_connection,
+    get_gmail_connection,
+    get_all_accounts,
+    get_account_by_id,
 )
+from gmail_to_supabase_sync import sync_gmail_accounts_for_user
 
 load_dotenv()
-app = Flask(__name__)
 
-CORS(app) # cors enabled
+app = Flask(__name__)
+CORS(app)
+
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:1000")
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
 
 def utc_now_iso():
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now().isoformat()
 
-def extract_lead_id_from_address(address_text : str):
-    if not address_text:
+
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
+def extract_email(text: str):
+    if not text:
         return None
-    match = re.search(r"lead-(\d+)@", address_text)
-    if match:
-        return int(match.group(1))
-    return None
-
-def get_request_payload():
-    if request.is_json:
-        return request.get_json(silent=True) or {}
-    return request.form
+    match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+    return match.group(0).lower() if match else None
 
 
-def create_initial_task(lead_id, analysis, company):
-    insert_task(
+def build_google_auth_url(crm_user_email: str) -> str:
+    base_url = "https://accounts.google.com/o/oauth2/v2/auth"
+    params = {
+        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+        "redirect_uri": os.getenv("GOOGLE_REDIRECT_URI"),
+        "response_type": "code",
+        "scope": "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email openid",
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": crm_user_email,
+    }
+    return f"{base_url}?{urlencode(params)}"
+
+
+def exchange_code_for_tokens(code: str) -> dict:
+    token_url = "https://oauth2.googleapis.com/token"
+    payload = {
+        "code": code,
+        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+        "redirect_uri": os.getenv("GOOGLE_REDIRECT_URI"),
+        "grant_type": "authorization_code",
+    }
+    response = requests.post(token_url, data=payload, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def get_google_profile(access_token: str) -> dict:
+    response = requests.get(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def create_followup_task_if_needed(lead_id: int, result: dict):
+    followup_days = result.get("followup_days")
+    task_title = result.get("task_title")
+    task_description = result.get("task_description")
+
+    if not followup_days or not task_title:
+        return None
+
+    due_date = (utc_now() + timedelta(days=int(followup_days))).isoformat()
+
+    task = insert_task(
         {
             "lead_id": lead_id,
-            "title": analysis.get("task_title", "Review lead"),
-            "description": analysis.get(
-                "task_description",
-                f"Review and follow up with {company}.",
-            ),
+            "title": task_title,
+            "description": task_description,
             "status": "open",
+            "due_date": due_date,
         }
     )
+    return task
 
 
-def merge_enrichment_and_ai(
-    enrichment,
-    analysis,
-    name,
-    company,
-    job_title,
-    email,
-    phone,
-    source,
-    description,
-    ocr_text=""
-):
-    account = enrichment.get("account") or company or "Unknown Company"
-    score = int(analysis.get("score", enrichment.get("leadScore", 60)))
-    lead_score = int(analysis.get("leadScore", score))
-    followup_days = int(analysis.get("followup_days", 3))
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "success", "message": "Accufy CRM backend running"}), 200
 
-    return {
-        "name": name or account,
-        "company": company or account,
-        "account": account,
-        "job_title": job_title or None,
-        "title": enrichment.get("title") or job_title or "New Business",
-        "email": email or None,
-        "phone": phone or None,
-        "ocr_text": ocr_text or None,
-        "source": source or "Website",
-        "description": description or None,
-        "intent": analysis.get("intent", "Interested lead"),
-        "score": score,
-        "priority": analysis.get("priority", "medium"),
-        "reason": analysis.get("reason", "Lead submitted form"),
-        "status": analysis.get("status", enrichment.get("status", "New")),
-        "stage": analysis.get("stage", enrichment.get("stage", "Lead")),
-        "amount": analysis.get("amount", enrichment.get("amount")),
-        "revenue": enrichment.get("revenue", "Unknown"),
-        "headcount": enrichment.get("headcount", "Unknown"),
-        "industry": enrichment.get("industry", "Unknown"),
-        "lead_score": lead_score,
-        "ai_next_action": analysis.get(
-            "aiNextAction",
-            enrichment.get("aiNextAction", "Review and qualify lead"),
-        ),
-        "next_action": analysis.get("next_action", "Review and qualify lead"),
-        "next_action_type": analysis.get("next_action_type", "manual_review"),
-        "owner": analysis.get("owner", enrichment.get("owner", "Unassigned")),
-        "account_icon": enrichment.get("accountIcon"),
-        "icon": enrichment.get("icon"),
-        "last_interaction": "Just now",
-        "last_funding": enrichment.get("lastFunding", "Unknown"),
-        "linkedin": enrichment.get("linkedin"),
-        "website": enrichment.get("website"),
-        "logo": enrichment.get("logo"),
-        "email_subject": analysis.get("email_subject", "Thanks for reaching out"),
-        "email_body": analysis.get("reply_message", "Thank you for contacting us."),
-        "followup": (
-            datetime.now(timezone.utc) + timedelta(days=followup_days)
-        ).isoformat(),
-        "created_at": utc_now_iso(),
-        "updated_at": utc_now_iso(),
-    }
 
-def signup():
-    data = request.json
+# -----------------------------
+# Auth
+# -----------------------------
+@app.route("/api/signup", methods=["POST"])
+def api_signup():
     try:
-        # Check if user already exists
-        if get_user_by_email(data.get('email')):
-            return jsonify({"status": "error", "message": "Email already registered"}), 400
-        
-        create_user(data)
-        return jsonify({"status": "success", "message": "User created"}), 201
+        data = request.get_json() or {}
+        name = (data.get("name") or "").strip()
+        email = normalize_email(data.get("email"))
+        password = (data.get("password") or "").strip()
+
+        if not name or not email or not password:
+            return jsonify({"status": "error", "message": "name, email and password are required"}), 400
+
+        existing = get_user_by_email(email)
+        if existing:
+            return jsonify({"status": "error", "message": "User already exists"}), 409
+
+        user = create_user(
+            {
+                "name": name,
+                "email": email,
+                "password": password,
+                "role": "user",
+                "isActive": True,
+            }
+        )
+        return jsonify({"status": "success", "user": user}), 201
+
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-def login():
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
     try:
-        data = request.json
-        email = data.get('email')
-        password = data.get('password')
+        data = request.get_json() or {}
+        email = normalize_email(data.get("email"))
+        password = (data.get("password") or "").strip()
 
         if not email or not password:
-            return jsonify({"status": "error", "message": "Missing credentials"}), 400
+            return jsonify({"status": "error", "message": "email and password are required"}), 400
 
-        # Use the helper to verify credentials
         user = verify_user_credentials(email, password)
-        
-        if user:
-            # Check if account is active based on your model
-            if not user.get('isActive', True):
-                return jsonify({"status": "error", "message": "Account is disabled"}), 403
-                
-            return jsonify({
-                "status": "success",
-                "message": "Login successful",
-                "user": user
-            }), 200
-        else:
-            return jsonify({"status": "error", "message": "Invalid email or password"}), 401
+        if not user:
+            return jsonify({"status": "error", "message": "Invalid credentials"}), 401
+
+        return jsonify({"status": "success", "user": user}), 200
 
     except Exception as e:
-        print(f"LOGIN ERROR: {str(e)}")
-        return jsonify({"status": "error", "message": "Internal server error"}), 500
-    
-@app.route('/api/forgot-password', methods=['PATCH'])
-def forgot_password():
-    data = request.json
-    email = data.get('email')
-    new_password = data.get('newPassword')
-    
-    user = get_user_by_email(email)
-    if not user:
-        return jsonify({"status": "error", "message": "User not found"}), 404
-        
-    update_user_password(email, new_password)
-    return jsonify({"status": "success", "message": "Password updated"}), 200
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-def update_stage():
+
+@app.route("/api/forgot-password", methods=["POST"])
+def api_forgot_password():
     try:
-        data = request.json
-        lead_id = data.get('leadId')
-        new_stage = data.get('stage')
-        print(f"Received request to update Lead {lead_id} to stage {new_stage}")
-        if not lead_id or not new_stage:
-            return jsonify({"status": "error", "message": "Missing leadId or stage"}), 400
+        data = request.get_json() or {}
+        email = normalize_email(data.get("email"))
+        new_password = (data.get("newPassword") or "").strip()
 
-        # Create the update dictionary
-        update_data = {
-            "stage": new_stage,
-            "updated_at": utc_now_iso() # Keeps your timestamps in sync
-        }
+        if not email or not new_password:
+            return jsonify({"status": "error", "message": "email and newPassword are required"}), 400
 
-        # Use your existing database helper function
-        # Note: lead_id might need to be cast to int if your DB expects it
-        update_lead(int(lead_id), update_data)
-        
-        print(f"Successfully updated Lead {lead_id} to stage {new_stage}")
-        return jsonify({
-            "status": "success", 
-            "message": f"Lead {lead_id} updated to {new_stage}"
-        }), 200
+        updated = update_user_password(email, new_password)
+        if not updated:
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        return jsonify({"status": "success", "message": "Password updated successfully"}), 200
 
     except Exception as e:
-        print(f"UPDATE STAGE ERROR: {str(e)}")
-        return jsonify({
-            "status": "error", 
-            "message": str(e)
-        }), 500
-        
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"}), 200
-
-@app.route("/api/dashboard-stats", methods=["GET"])
-def api_dashboard_stats():
-    leads = get_all_leads()
-    
-    return jsonify({
-        "total_leads": len(leads),
-        "leads": leads,
-        "hot_leads": len([l for l in leads if l.get("status") == "Hot"]),
-        "warm_leads": len([l for l in leads if l.get("status") == "Warm"]),
-        "cold_leads": len([l for l in leads if l.get("status") == "Cold"]),
-        "avg_score": round(sum([int(l.get("score", 0)) for l in leads]) / len(leads), 1) if leads else 0
-    }), 200
-
-@app.route("/dashboard", methods=["GET"])
-def dashboard():
-    try:
-        leads = get_all_leads()
-        total_leads = len(leads)
-        hot_leads = len([l for l in leads if l.get("status") == "Hot"])
-        warm_leads = len([l for l in leads if l.get("status") == "Warm"])
-        cold_leads = len([l for l in leads if l.get("status") == "Cold"])
-        scores = [int(l.get("score", 0)) for l in leads if l.get("score") is not None]
-        avg_score = round(sum(scores) / len(scores), 1) if scores else 0
-        needs_action = [l for l in leads if l.get("next_action_type") or l.get("status") == "Hot"]
-        recent_leads = leads[:5]
-
-        return render_template(
-            "dashboard.html",
-            leads=leads,
-            total_leads=total_leads,
-            hot_leads=hot_leads,
-            warm_leads=warm_leads,
-            cold_leads=cold_leads,
-            avg_score=avg_score,
-            needs_action=needs_action,
-            recent_leads=recent_leads,
-        )
-    except Exception as e:
-        return f"Error loading dashboard: {str(e)}", 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/lead/<int:lead_id>", methods=["GET"])
-def lead_detail(lead_id):
-    try:
-        lead = get_lead_by_id(lead_id)
-        messages = get_messages_by_lead(lead_id)
-        tasks = get_tasks_by_lead(lead_id)
-
-        return render_template(
-            "lead_detail.html",
-            lead=lead,
-            messages=messages,
-            tasks=tasks,
-        )
-    except Exception as e:
-        return f"Error loading lead detail: {str(e)}", 500
-
-
+# -----------------------------
+# Lead submission + AI scoring
+# -----------------------------
 @app.route("/submit", methods=["POST"])
 def submit_lead():
     try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({"error": "Invalid or missing JSON body"}), 400
-
-        name = (data.get("name") or "").strip()
-        company = (data.get("company") or data.get("account") or "").strip()
-        job_title = (data.get("job_title") or data.get("title") or "").strip()
-        email = (data.get("email") or "").strip()
-        phone = (data.get("phone") or "").strip()
-        source = (data.get("source") or "Website").strip()
-        description = (data.get("description") or "").strip()
-        
-        
-        enrichment = enrich_company_profile(company_name=company, email=email)
-
-        analysis = analyze_lead_with_llm(
-            text=description or f"New lead from {company or email or 'unknown source'}",
-            company=company,
-            email=email,
-            job_title=job_title,
-            enrichment=enrichment,
-        )
-
-        lead_data = merge_enrichment_and_ai(
-            enrichment=enrichment,
-            analysis=analysis,
-            name=name,
-            company=company,
-            job_title=job_title,
-            email=email,
-            phone=phone,
-            source=source,
-            description=description,
-            ocr_text=ocr_text,
-        )
-
-        inserted = insert_lead(lead_data)
-        lead = inserted[0] if isinstance(inserted, list) else inserted
-        lead_id = lead["id"]
-
-        create_initial_task(
-            lead_id,
-            analysis,
-            company or enrichment.get("account") or "Unknown Company",
-        )
-
-        if email:
-            send_email(
-                to_email=email,
-                subject=analysis.get("email_subject", "Thanks for reaching out"),
-                body=analysis.get("reply_message", "Thank you for contacting us."),
-                lead_id=lead_id,
-            )
-
-        if request.is_json:
-            return jsonify(
-                {
-                    "message": "Lead created successfully",
-                    "lead_id": lead_id,
-                    "lead": lead_data,
-                }
-            ), 201
-
-        return redirect(url_for("dashboard"))
-    except Exception as e:
-        print("SUBMIT ERROR:", str(e))
-        if request.is_json:
-            return jsonify({"error": str(e)}), 500
-        return f"Error while submitting lead: {str(e)}", 500
-
-
-@app.route("/api/leads/enrich", methods=["POST"])
-def api_enrich_lead():
-    try:
         data = request.get_json() or {}
-        company = (data.get("company") or data.get("account") or "").strip()
-        email = (data.get("email") or "").strip()
-        job_title = (data.get("job_title") or data.get("title") or "").strip()
+        name = (data.get("name") or "").strip()
+        email = normalize_email(data.get("email"))
+        company = (data.get("company") or "").strip()
+        source = (data.get("source") or "manual").strip()
         description = (data.get("description") or "").strip()
 
-        enrichment = enrich_company_profile(company_name=company, email=email)
+        if not name and not email and not company and not description:
+            return jsonify({"status": "error", "message": "At least one lead field is required"}), 400
 
-        analysis = analyze_lead_with_llm(
-            text=description or f"New lead from {company or email or 'unknown source'}",
-            company=company,
-            email=email,
-            job_title=job_title,
-            enrichment=enrichment,
-        )
+        ai_input = f"""
+        Name: {name}
+        Email: {email}
+        Company: {company}
+        Source: {source}
+        Description: {description}
+        """
+        result = analyze_lead_with_llm(ai_input)
 
-        preview = merge_enrichment_and_ai(
-            enrichment=enrichment,
-            analysis=analysis,
-            name="",
-            company=company,
-            job_title=job_title,
-            email=email,
-            phone="",
-            source="Preview",
-            description=description,
-        )
-
-        return jsonify({"success": True, "lead": preview}), 200
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route("/inbound-email", methods=["POST"])
-def inbound_email():
-    try:
-        
-        print("=== INBOUND EMAIL HIT ===")
-        print("FORM DATA:", request.form)
-        
-        to_addr = request.form.get("to", "")
-        from_addr = request.form.get("from", "")
-        subject = request.form.get("subject", "")
-        body = request.form.get("text", "") or request.form.get("html", "")
-
-        lead_id = extract_lead_id_from_address(to_addr)
-        if not lead_id:
-            return "Lead id not found", 400
-
-        insert_message(
-            {
-                "lead_id": lead_id,
-                "direction": "inbound",
-                "subject": subject,
-                "body": body,
-                "sender_email": from_addr,
-                "thread_key": f"lead-{lead_id}",
-            }
-        )
-
-        existing_lead = get_lead_by_id(lead_id) or {}
-        enrichment = {
-            "industry": existing_lead.get("industry"),
-            "revenue": existing_lead.get("revenue"),
-            "headcount": existing_lead.get("headcount"),
-            "linkedin": existing_lead.get("linkedin"),
-            "website": existing_lead.get("website"),
-            "title": existing_lead.get("title") or existing_lead.get("job_title"),
-            "account": existing_lead.get("account") or existing_lead.get("company"),
-            "lastFunding": existing_lead.get("last_funding"),
+        lead_payload = {
+            "name": name,
+            "email": email,
+            "company": company,
+            "source": source,
+            "description": description,
+            "intent": result.get("intent"),
+            "score": result.get("score"),
+            "priority": result.get("priority"),
+            "status": result.get("status"),
+            "reason": result.get("reason"),
+            "reply_message": result.get("reply_message"),
+            "email_subject": result.get("email_subject"),
+            "followup_days": result.get("followup_days"),
+            "task_title": result.get("task_title"),
+            "task_description": result.get("task_description"),
+            "next_action": result.get("next_action"),
+            "next_action_type": result.get("next_action_type"),
+            "auto_reply": result.get("auto_reply", False),
         }
 
-        action = analyze_reply_action(
-            text=body,
-            company=existing_lead.get("company"),
-            email=existing_lead.get("email"),
-            job_title=existing_lead.get("job_title"),
-            enrichment=enrichment,
-        )
+        lead = insert_lead(lead_payload)
 
-        update_lead(
-            lead_id,
-            {
-                "intent": action.get("intent", existing_lead.get("intent", "Interested lead")),
-                "score": int(action.get("score", existing_lead.get("score", 60))),
-                "lead_score": int(action.get("leadScore", action.get("score", existing_lead.get("score", 60)))),
-                "priority": action.get("priority", existing_lead.get("priority", "medium")),
-                "reason": action.get("reason", "Inbound reply received"),
-                "status": action.get("status", existing_lead.get("status", "Warm")),
-                "stage": action.get("stage", existing_lead.get("stage", "Lead")),
-                "next_action": action.get("next_action", existing_lead.get("next_action", "Review and qualify lead")),
-                "next_action_type": action.get("next_action_type", existing_lead.get("next_action_type", "manual_review")),
-                "ai_next_action": action.get("aiNextAction", existing_lead.get("ai_next_action", "Review and qualify lead")),
-                "updated_at": utc_now_iso(),
-            },
-        )
-
-        insert_task(
-            {
-                "lead_id": lead_id,
-                "title": action.get("task_title", "Review inbound reply"),
-                "description": action.get(
-                    "task_description",
-                    "Review inbound reply and continue conversation.",
-                ),
-                "status": "open",
-            }
-        )
-
-        if action.get("auto_reply", False):
-            send_email(
-                to_email=from_addr,
-                subject=action.get("email_subject", f"Re: {subject}"),
-                body=action.get("reply_message", "Thank you for your message."),
-                lead_id=lead_id,
-            )
-
-        return "OK", 200
-    except Exception as e:
-        print("INBOUND ERROR:", str(e))
-        return f"Error: {str(e)}", 500
-
-
-@app.route("/run-action/<int:lead_id>", methods=["POST"])
-def run_action(lead_id):
-    try:
-        lead = get_lead_by_id(lead_id)
-        if not lead:
-            return "Lead not found", 404
-
-        action_type = lead.get("next_action_type")
-        email = lead.get("email")
-        company = lead.get("company") or "your team"
-
-        if action_type == "send_pricing":
-            if email:
-                send_email(
-                    to_email=email,
-                    subject="Pricing details",
-                    body="Thank you for your interest.\nPlease find our pricing details. Let us know if you would like a quotation call.",
-                    lead_id=lead_id,
-                )
-        elif action_type == "schedule_demo":
-            if email:
-                send_email(
-                    to_email=email,
-                    subject="Schedule a demo",
-                    body="We would be happy to schedule a demo. Please share your available time slots.",
-                    lead_id=lead_id,
-                )
-        elif action_type == "send_followup":
-            if email:
-                send_email(
-                    to_email=email,
-                    subject="Follow-up from our team",
-                    body=f"Hello, this is a follow-up regarding your interest in our solution for {company}.\nPlease let us know how we can help further.",
-                    lead_id=lead_id,
-                )
-        elif action_type == "close_lead":
-            update_lead(
-                lead_id,
+        if lead and description:
+            insert_message(
                 {
-                    "status": "Cold",
-                    "updated_at": utc_now_iso(),
-                },
+                    "lead_id": lead["id"],
+                    "direction": "inbound",
+                    "sender": email,
+                    "recipient": "",
+                    "subject": company or "Lead submission",
+                    "body": description,
+                }
             )
-        else:
-            return "Unknown action type", 400
 
-        insert_task(
-            {
-                "lead_id": lead_id,
-                "title": f"Executed action: {action_type}",
-                "description": f"AI recommended action '{action_type}' was executed.",
-                "status": "open",
-            }
-        )
-
-        update_lead(lead_id, {"updated_at": utc_now_iso()})
-        return redirect(url_for("lead_detail", lead_id=lead_id))
-    except Exception as e:
-        return f"Error running action: {str(e)}", 500
-
-
-@app.route("/api/leads", methods=["GET"])
-def api_get_all_leads():
-    try:
-        leads = get_all_leads()
-        return jsonify(leads), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-#json api routes.
-
-@app.route("/api/leads", methods=["POST"])
-def api_create_lead():
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Invalid or missing JSON body"}), 400
-
-        name = (data.get("name") or "").strip()
-        company = (data.get("company") or data.get("account") or "").strip()
-        job_title = (data.get("job_title") or data.get("title") or "").strip()
-        email = (data.get("email") or "").strip()
-        phone = (data.get("phone") or "").strip()
-        source = (data.get("source") or "API").strip()
-        description = (data.get("description") or "").strip()
-
-        enrichment = enrich_company_profile(company_name=company, email=email)
-
-        analysis = analyze_lead_with_llm(
-            text=description or f"New lead from {company or email or 'unknown source'}",
-            company=company,
-            email=email,
-            job_title=job_title,
-            enrichment=enrichment,
-        )
-
-        lead_data = merge_enrichment_and_ai(
-            enrichment=enrichment,
-            analysis=analysis,
-            name=name,
-            company=company,
-            job_title=job_title,
-            email=email,
-            phone=phone,
-            source=source,
-            description=description,
-            ocr_text=ocr_text,
-        )
-
-        inserted = insert_lead(lead_data)
-        lead = inserted[0] if isinstance(inserted, list) else inserted
-        lead_id = lead["id"]
-
-        create_initial_task(
-            lead_id,
-            analysis,
-            company or enrichment.get("account") or "Unknown Company",
-        )
-
-        if email:
-            send_email(
-                to_email=email,
-                subject=analysis.get("email_subject", "Thanks for reaching out"),
-                body=analysis.get("reply_message", "Thank you for contacting us."),
-                lead_id=lead_id,
-            )
+        task = None
+        if lead:
+            task = create_followup_task_if_needed(lead["id"], result)
 
         return jsonify(
             {
-                "message": "Lead created successfully",
-                "lead_id": lead_id,
+                "status": "success",
                 "lead": lead,
+                "task": task,
+                "ai": result,
             }
         ), 201
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# -----------------------------
+# Inbound email handling
+# -----------------------------
+@app.route("/inbound-email", methods=["POST"])
+def inbound_email():
+    try:
+        data = request.get_json(silent=True) or {}
+        sender = normalize_email(data.get("from") or data.get("sender"))
+        subject = (data.get("subject") or "").strip()
+        body = (data.get("text") or data.get("body") or data.get("html") or "").strip()
+
+        if not sender and not body:
+            return jsonify({"status": "error", "message": "Email sender/body missing"}), 400
+
+        ai_result = analyze_reply_action(subject=subject, body=body)
+
+        leads = get_all_leads()
+        matched_lead = None
+        for lead in leads:
+            lead_email = normalize_email(lead.get("email"))
+            if sender and lead_email == sender:
+                matched_lead = lead
+                break
+
+        if matched_lead:
+            insert_message(
+                {
+                    "lead_id": matched_lead["id"],
+                    "direction": "inbound",
+                    "sender": sender,
+                    "recipient": "",
+                    "subject": subject,
+                    "body": body,
+                }
+            )
+
+            update_payload = {}
+            if ai_result.get("status"):
+                update_payload["status"] = ai_result["status"]
+            if ai_result.get("next_action"):
+                update_payload["next_action"] = ai_result["next_action"]
+
+            if update_payload:
+                update_lead(matched_lead["id"], update_payload)
+
+        return jsonify(
+            {
+                "status": "success",
+                "matched_lead_id": matched_lead["id"] if matched_lead else None,
+                "ai": ai_result,
+            }
+        ), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# -----------------------------
+# Leads / Dashboard
+# -----------------------------
+@app.route("/api/leads", methods=["GET"])
+def api_leads():
+    try:
+        leads = get_all_leads()
+        return jsonify({"status": "success", "leads": leads}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/leads/<int:lead_id>", methods=["GET"])
-def api_get_lead(lead_id):
+def api_lead_detail(lead_id: int):
     try:
         lead = get_lead_by_id(lead_id)
         if not lead:
-            return jsonify({"error": "Lead not found"}), 404
-        return jsonify(lead), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/leads/<int:lead_id>/messages", methods=["GET"])
-def api_get_messages_by_lead_route(lead_id):
-    try:
-        lead = get_lead_by_id(lead_id)
-        if not lead:
-            return jsonify({"error": "Lead not found"}), 404
+            return jsonify({"status": "error", "message": "Lead not found"}), 404
 
         messages = get_messages_by_lead(lead_id)
-        return jsonify({"lead_id": lead_id, "count": len(messages), "messages": messages}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/leads/<int:lead_id>/tasks", methods=["GET"])
-def api_get_tasks_by_lead_route(lead_id):
-    try:
-        lead = get_lead_by_id(lead_id)
-        if not lead:
-            return jsonify({"error": "Lead not found"}), 404
-
         tasks = get_tasks_by_lead(lead_id)
-        return jsonify({"lead_id": lead_id, "count": len(tasks), "tasks": tasks}), 200
+
+        return jsonify(
+            {
+                "status": "success",
+                "lead": lead,
+                "messages": messages,
+                "tasks": tasks,
+            }
+        ), 200
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/dashboard-stats", methods=["GET"])
+def api_dashboard_stats():
+    try:
+        leads = get_all_leads()
+
+        total = len(leads)
+        high_priority = sum(1 for l in leads if (l.get("priority") or "").lower() == "high")
+        warm = sum(1 for l in leads if (l.get("status") or "").lower() == "warm")
+        hot = sum(1 for l in leads if (l.get("status") or "").lower() == "hot")
+
+        return jsonify(
+            {
+                "status": "success",
+                "stats": {
+                    "totalLeads": total,
+                    "highPriority": high_priority,
+                    "warmLeads": warm,
+                    "hotLeads": hot,
+                },
+                "leads": leads,
+            }
+        ), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# -----------------------------
+# Gmail integration
+# -----------------------------
+@app.route("/api/gmail/connect", methods=["GET"])
+def api_gmail_connect():
+    try:
+        crm_user_email = normalize_email(request.args.get("crm_user_email"))
+        if not crm_user_email:
+            return jsonify({"status": "error", "message": "crm_user_email is required"}), 400
+
+        auth_url = build_google_auth_url(crm_user_email)
+        return jsonify({"status": "success", "auth_url": auth_url}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/gmail/callback", methods=["GET"])
+def api_gmail_callback():
+    try:
+        code = request.args.get("code")
+        crm_user_email = normalize_email(request.args.get("state"))
+
+        if not code or not crm_user_email:
+            return jsonify({"status": "error", "message": "Missing code or state"}), 400
+
+        token_data = exchange_code_for_tokens(code)
+        access_token = token_data.get("access_token")
+        existing = get_gmail_connection(crm_user_email)
+        refresh_token = token_data.get("refresh_token") or (existing or {}).get("refresh_token")
+
+        if not access_token:
+            return jsonify({"status": "error", "message": "No access token received"}), 400
+        if not refresh_token:
+            return jsonify({"status": "error", "message": "No refresh token available"}), 400
+
+        profile = get_google_profile(access_token)
+        google_email = normalize_email(profile.get("email"))
+
+        save_gmail_connection(
+            {
+                "crm_user_email": crm_user_email,
+                "google_email": google_email,
+                "refresh_token": refresh_token,
+                "scopes": "gmail.readonly",
+                "updated_at": utc_now_iso(),
+            }
+        )
+
+        return jsonify(
+            {
+                "status": "success",
+                "message": "Gmail connected successfully",
+                "crm_user_email": crm_user_email,
+                "google_email": google_email,
+            }
+        ), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/gmail/status", methods=["GET"])
+def api_gmail_status():
+    try:
+        crm_user_email = normalize_email(request.args.get("crm_user_email"))
+        if not crm_user_email:
+            return jsonify({"status": "error", "message": "crm_user_email is required"}), 400
+
+        connection = get_gmail_connection(crm_user_email)
+
+        return jsonify(
+            {
+                "status": "success",
+                "connected": bool(connection),
+                "google_email": connection.get("google_email") if connection else None,
+                "crm_user_email": crm_user_email,
+            }
+        ), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/gmail/sync", methods=["POST"])
+def api_gmail_sync():
+    try:
+        data = request.get_json() or {}
+        crm_user_email = normalize_email(data.get("crm_user_email"))
+        max_pages = int(data.get("max_pages", 20))
+
+        if not crm_user_email:
+            return jsonify({"status": "error", "message": "crm_user_email is required"}), 400
+
+        result = sync_gmail_accounts_for_user(crm_user_email, max_pages=max_pages)
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# -----------------------------
+# Accounts API for frontend
+# -----------------------------
+@app.route("/api/accounts", methods=["GET"])
+def api_accounts():
+    try:
+        accounts = get_all_accounts()
+        return jsonify({"status": "success", "accounts": accounts}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/accounts/<int:account_id>", methods=["GET"])
+def api_account_detail(account_id: int):
+    try:
+        account = get_account_by_id(account_id)
+        if not account:
+            return jsonify({"status": "error", "message": "Account not found"}), 404
+        return jsonify({"status": "success", "account": account}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port) 
+    port = int(os.getenv("PORT", "1000"))
+    app.run(host="0.0.0.0", port=port, debug=True) 

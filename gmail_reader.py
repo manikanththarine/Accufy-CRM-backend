@@ -1,203 +1,110 @@
 import os
-import re
-import base64
+import email.utils
+from typing import Optional
+
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+
+PERSONAL_DOMAINS = {
+    "gmail.com",
+    "yahoo.com",
+    "outlook.com",
+    "hotmail.com",
+    "icloud.com",
+    "live.com",
+    "proton.me",
+    "protonmail.com",
+}
 
 
-def get_gmail_service():
-    creds = None
-
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-
-    if not creds:
-        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-        creds = flow.run_local_server(port=0)
-
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-
-    return build('gmail', 'v1', credentials=creds)
+def get_gmail_service(refresh_token: str):
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.getenv("GOOGLE_CLIENT_ID"),
+        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+        scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+    )
+    return build("gmail", "v1", credentials=creds)
 
 
-def get_recent_messages(service, max_results=20):
-    results = service.users().messages().list(
-        userId='me',
-        maxResults=max_results,
-        q="category:primary -from:me"
-    ).execute()
+def list_all_messages(service, label_ids=None, max_pages: int = 20):
+    all_messages = []
+    page_token = None
+    pages = 0
 
-    return results.get('messages', [])
+    while pages < max_pages:
+        result = (
+            service.users()
+            .messages()
+            .list(
+                userId="me",
+                labelIds=label_ids or ["INBOX"],
+                maxResults=100,
+                pageToken=page_token,
+            )
+            .execute()
+        )
+        all_messages.extend(result.get("messages", []))
+        page_token = result.get("nextPageToken")
+        pages += 1
 
+        if not page_token:
+            break
 
-def _decode_base64_data(data):
-    if not data:
-        return ""
-    try:
-        decoded_bytes = base64.urlsafe_b64decode(data.encode("UTF-8"))
-        return decoded_bytes.decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
-
-
-def _extract_plain_text_from_payload(payload):
-    if not payload:
-        return ""
-
-    mime_type = payload.get("mimeType", "")
-    body = payload.get("body", {}) or {}
-
-    if mime_type == "text/plain":
-        return _decode_base64_data(body.get("data"))
-
-    parts = payload.get("parts", [])
-    if parts:
-        collected = []
-        for part in parts:
-            part_mime = part.get("mimeType", "")
-            if part_mime == "text/plain":
-                text = _decode_base64_data((part.get("body") or {}).get("data"))
-                if text:
-                    collected.append(text)
-            else:
-                nested = _extract_plain_text_from_payload(part)
-                if nested:
-                    collected.append(nested)
-        return "\n".join([p for p in collected if p]).strip()
-
-    return _decode_base64_data(body.get("data"))
+    return all_messages
 
 
-def _extract_html_text_from_payload(payload):
-    if not payload:
-        return ""
-
-    mime_type = payload.get("mimeType", "")
-    body = payload.get("body", {}) or {}
-
-    if mime_type == "text/html":
-        return _decode_base64_data(body.get("data"))
-
-    parts = payload.get("parts", [])
-    if parts:
-        collected = []
-        for part in parts:
-            part_mime = part.get("mimeType", "")
-            if part_mime == "text/html":
-                text = _decode_base64_data((part.get("body") or {}).get("data"))
-                if text:
-                    collected.append(text)
-            else:
-                nested = _extract_html_text_from_payload(part)
-                if nested:
-                    collected.append(nested)
-        return "\n".join([p for p in collected if p]).strip()
-
+def _get_header(headers, name: str) -> str:
+    for item in headers:
+        if item.get("name", "").lower() == name.lower():
+            return item.get("value", "")
     return ""
 
 
-def _strip_html_tags(html_text):
-    if not html_text:
-        return ""
-    text = re.sub(r"<style.*?>.*?</style>", " ", html_text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<script.*?>.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def get_message_detail(service, msg_id):
-    msg = service.users().messages().get(userId='me', id=msg_id, format="full").execute()
-    payload = msg.get("payload", {}) or {}
-    headers = payload.get("headers", [])
-
-    subject = ""
-    from_value = ""
-    date_value = ""
-
-    for h in headers:
-        name = h.get("name", "")
-        value = h.get("value", "")
-        if name == "Subject":
-            subject = value
-        elif name == "From":
-            from_value = value
-        elif name == "Date":
-            date_value = value
-
-    plain_text = _extract_plain_text_from_payload(payload)
-    html_text = _extract_html_text_from_payload(payload)
-
-    body_text = plain_text.strip()
-    if not body_text and html_text:
-        body_text = _strip_html_tags(html_text)
-
-    return {
-        "subject": subject,
-        "from": from_value,
-        "date": date_value,
-        "body": body_text[:12000],
-    }
-
-
-def extract_email(from_text):
-    match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', from_text or "")
-    return match.group(0).lower() if match else None
-
-
-def extract_domain(email):
-    if not email or "@" not in email:
+def extract_domain(email_address: str) -> Optional[str]:
+    if not email_address or "@" not in email_address:
         return None
-
-    domain = email.split("@")[-1].lower().strip()
-
-    blocked = {
-        "gmail.com", "yahoo.com", "outlook.com", "hotmail.com",
-        "icloud.com", "proton.me", "protonmail.com"
-    }
-
-    if domain in blocked:
+    domain = email_address.split("@")[-1].strip().lower()
+    if domain in PERSONAL_DOMAINS:
         return None
-
     return domain
 
 
-def extract_sender_name(from_text):
-    if not from_text:
-        return None
+def parse_email_address(raw_from: str):
+    name, email_address = email.utils.parseaddr(raw_from or "")
+    return {
+        "sender_name": name.strip() or None,
+        "sender_email": email_address.strip().lower() or None,
+    }
 
-    cleaned = re.sub(r'<.*?>', '', from_text).strip().strip('"')
-    return cleaned if cleaned else None
 
+def fetch_and_parse_message(service, message_id: str):
+    msg = (
+        service.users()
+        .messages()
+        .get(userId="me", id=message_id, format="full")
+        .execute()
+    )
 
-def extract_companies_from_gmail(max_results=20):
-    service = get_gmail_service()
-    messages = get_recent_messages(service, max_results=max_results)
+    payload = msg.get("payload", {})
+    headers = payload.get("headers", [])
+    internal_date_ms = msg.get("internalDate")
 
-    results = []
-    seen_domains = set()
+    from_raw = _get_header(headers, "From")
+    subject = _get_header(headers, "Subject")
 
-    for msg in messages:
-        detail = get_message_detail(service, msg['id'])
+    parsed_sender = parse_email_address(from_raw)
+    snippet = msg.get("snippet", "")
 
-        sender_email = extract_email(detail["from"])
-        domain = extract_domain(sender_email)
-        sender_name = extract_sender_name(detail["from"])
-
-        if domain and domain not in seen_domains:
-            seen_domains.add(domain)
-            results.append({
-                "sender_name": sender_name,
-                "sender_email": sender_email,
-                "domain": domain,
-                "subject": detail["subject"],
-                "body": detail["body"],
-                "date": detail["date"],
-                "raw_from": detail["from"]
-            })
-
-    return results 
+    return {
+        "gmail_message_id": msg.get("id"),
+        "thread_id": msg.get("threadId"),
+        "subject": subject,
+        "snippet": snippet,
+        "sender_name": parsed_sender.get("sender_name"),
+        "sender_email": parsed_sender.get("sender_email"),
+        "received_at_unix_ms": internal_date_ms,
+    } 
