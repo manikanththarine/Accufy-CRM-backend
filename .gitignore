@@ -2,4 +2,7 @@
 __pycache__/ 
 *.pyc 
 contacts.csv
-node_modules
+.env*
+.vscode/
+token.json
+credentials.json
