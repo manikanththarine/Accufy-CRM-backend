@@ -6,3 +6,5 @@ contacts.csv
 .vscode/
 token.json
 credentials.json
+node_modules/
+dist/
