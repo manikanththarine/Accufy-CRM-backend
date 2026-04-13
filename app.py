@@ -209,7 +209,7 @@ def submit_lead():
         company = (data.get("company") or "").strip()
         source = (data.get("source") or "manual").strip()
         description = (data.get("description") or "").strip()
-        print("Received lead submission:", name, email, company, source)
+        jobTitle = (data.get("jobTitle") or "").strip()
         if not name and not email and not company and not description:
             return jsonify({"status": "error", "message": "At least one lead field is required"}), 400
 
@@ -220,7 +220,8 @@ def submit_lead():
         Source: {source}
         Description: {description}
         """
-        result = analyze_lead_with_llm(ai_input)
+
+        result = analyze_lead_with_llm(text=description, company=company, email=email, job_title=jobTitle, enrichment={})
 
         lead_payload = {
             "name": name,

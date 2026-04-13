@@ -47,9 +47,9 @@ def _parse_json_safely(text):
         return {}
 
 
-def analyze_with_openai(text, company=None, email=None, job_title=None, enrichment=None):
+def analyze_with_openai(text, company, email, job_title, enrichment=None):
     enrichment = enrichment or {}
-
+    print("Analyzing:", text,company,email,job_title,enrichment)
     if not OPENAI_API_KEY:
         return _fallback_result("OPENAI_API_KEY missing", enrichment=enrichment)
 
@@ -175,7 +175,7 @@ Lead context:
         return _fallback_result(f"OpenAI exception: {str(exc)}", enrichment=enrichment)
 
 
-def analyze_lead_with_llm(text, company=None, email=None, job_title=None, enrichment=None):
+def analyze_lead_with_llm(text, company, email, job_title, enrichment=None):
     return analyze_with_openai(
         text=text,
         company=company,
@@ -185,7 +185,7 @@ def analyze_lead_with_llm(text, company=None, email=None, job_title=None, enrich
     )
 
 
-def analyze_reply_action(text, company=None, email=None, job_title=None, enrichment=None):
+def analyze_reply_action(text, company, email, job_title, enrichment=None):
     return analyze_with_openai(
         text=text,
         company=company,
