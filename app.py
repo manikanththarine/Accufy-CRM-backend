@@ -213,16 +213,18 @@ def submit_lead():
         if not name and not email and not company and not description:
             return jsonify({"status": "error", "message": "At least one lead field is required"}), 400
 
-        ai_input = f"""
-        Name: {name}
-        Email: {email}
-        Company: {company}
-        Source: {source}
-        Description: {description}
-        """
+        # 2. Get AI Analysis
+        # Ensure result is always a dict to prevent .get() errors
+        result = analyze_lead_with_llm(
+            text=description, 
+            company=company, 
+            email=email, 
+            job_title=jobTitle, 
+            enrichment={}
+        ) or {}
+        
 
-        result = analyze_lead_with_llm(text=description, company=company, email=email, job_title=jobTitle, enrichment={})
-
+        # 3. Build Lead Payload with Type Safety
         lead_payload = {
             "name": name,
             "email": email,
@@ -231,50 +233,56 @@ def submit_lead():
             "job_title": jobTitle,
             "description": description,
             "intent": result.get("intent"),
-            "score": result.get("score"),
-            "priority": result.get("priority"),
-            "status": result.get("status"),
+            "score": int(result.get("score", 0)) if result.get("score") is not None else 0,
+            "priority": result.get("priority", "medium"),
+            "status": result.get("status", "New"),
             "reason": result.get("reason"),
             "reply_message": result.get("reply_message"),
             "email_subject": result.get("email_subject"),
-            "followup_days": result.get("followup_days"),
+            "followup_days": int(result.get("followup_days", 0)) if result.get("followup_days") is not None else 0,
             "task_title": result.get("task_title"),
             "task_description": result.get("task_description"),
             "next_action": result.get("next_action"),
             "next_action_type": result.get("next_action_type"),
-            "auto_reply": result.get("auto_reply", False),
+            "auto_reply": bool(result.get("auto_reply", False)),
+            "stage": result.get("stage", "Lead"),
+            "amount": result.get("amount"), 
+            "leadScore": int(result.get("leadScore", 0)) if result.get("leadScore") is not None else 0,
+            "aiNextAction": result.get("aiNextAction"),
+            "owner": result.get("owner", "Unassigned"),
         }
+        print("AI Analysis Result:", lead_payload)
 
+        # 4. Database Operations
         lead = insert_lead(lead_payload)
 
-        if lead and description:
-            insert_message(
-                {
+        if lead:
+            # Save the inbound message history
+            if description:
+                insert_message({
                     "lead_id": lead["id"],
                     "direction": "inbound",
                     "sender": email,
                     "recipient": "",
                     "subject": company or "Lead submission",
                     "body": description,
-                }
-            )
+                })
 
-        task = None
-        if lead:
+            # Create follow-up tasks based on AI suggestions
             task = create_followup_task_if_needed(lead["id"], result)
 
-        return jsonify(
-            {
+            return jsonify({
                 "status": "success",
                 "lead": lead,
                 "task": task,
                 "ai": result,
-            }
-        ), 201
+            }), 201
+        else:
+            return jsonify({"status": "error", "message": "Failed to insert lead into database"}), 500
 
     except Exception as e:
+        print(f"Error in submit_lead: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
-
 
 # -----------------------------
 # Inbound email handling
