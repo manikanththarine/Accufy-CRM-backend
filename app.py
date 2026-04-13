@@ -228,6 +228,7 @@ def submit_lead():
             "email": email,
             "company": company,
             "source": source,
+            "job_title": jobTitle,
             "description": description,
             "intent": result.get("intent"),
             "score": result.get("score"),

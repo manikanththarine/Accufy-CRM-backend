@@ -47,7 +47,7 @@ def _parse_json_safely(text):
         return {}
 
 
-def analyze_with_openai(text, company, email, job_title, enrichment=None):
+def analyze_with_openai(text, company, email, job_title, enrichment):
     enrichment = enrichment or {}
     print("Analyzing:", text,company,email,job_title,enrichment)
     if not OPENAI_API_KEY:
