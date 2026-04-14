@@ -186,7 +186,6 @@ def api_signup():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route("/api/login", methods=["POST"])
 def api_login():
     try:
@@ -407,7 +406,6 @@ def api_lead_detail(lead_id: int):
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route("/api/dashboard-stats", methods=["GET"])
 def api_dashboard_stats():
     try:
@@ -450,7 +448,6 @@ def api_gmail_connect():
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
 
 @app.route("/api/gmail/callback", methods=["GET"])
 def api_gmail_callback():
@@ -518,7 +515,6 @@ def api_gmail_status():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route("/api/gmail/sync", methods=["POST"])
 def api_gmail_sync():
     try:
@@ -562,4 +558,4 @@ def api_account_detail(account_id: int):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "1000"))
     app.run(host="0.0.0.0", port=port, debug=True) 
-# changed api key
+
