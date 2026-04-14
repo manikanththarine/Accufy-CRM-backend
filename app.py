@@ -104,6 +104,7 @@ def create_followup_task_if_needed(lead_id: int, result: dict):
         return None
 
     due_date = (utc_now() + timedelta(days=int(followup_days))).isoformat()
+    print(f"Current UTC time: {datetime.now()}")
 
     task = insert_task(
         {
@@ -111,15 +112,46 @@ def create_followup_task_if_needed(lead_id: int, result: dict):
             "title": task_title,
             "description": task_description,
             "status": "open",
-            "due_date": due_date,
+            # "due_date": due_date,
         }
     )
     return task
 
 
-@app.route("/", methods=["GET"])
-def health():
-    return jsonify({"status": "success", "message": "Accufy CRM backend running"}), 200
+
+@app.route('/api/update-lead-stage', methods=['PATCH'])
+def update_stage():
+    data = request.json
+    lead_id = data.get('lead_id')
+    new_stage = data.get('stage')
+
+    if not lead_id or not new_stage:
+        return jsonify({"error": "Missing lead_id or stage"}), 400
+
+    # 1. Create the payload
+    # We update the stage and the 'last_interaction' timestamp automatically
+    update_payload = {
+        "stage": new_stage,
+        "last_interaction": datetime.now(timezone.utc).isoformat()
+    }
+
+    try:
+        # 2. Call the update function
+        # Note: In this route context, lead_id comes directly from the request
+        update_lead(lead_id, update_payload)
+        
+        return jsonify({
+            "status": "success", 
+            "message": f"Lead {lead_id} moved to {new_stage}"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error updating lead stage: {e}")
+        return jsonify({"error": str(e)}), 500
+    
+# @app.route("/", methods=["GET"])
+# def health():
+#     return jsonify({"status": "success", "message": "Accufy CRM backend running"}), 200
 
 
 # -----------------------------
@@ -237,18 +269,18 @@ def submit_lead():
             "priority": result.get("priority", "medium"),
             "status": result.get("status", "New"),
             "reason": result.get("reason"),
-            "reply_message": result.get("reply_message"),
+            # "reply_message": result.get("reply_message"),
             "email_subject": result.get("email_subject"),
-            "followup_days": int(result.get("followup_days", 0)) if result.get("followup_days") is not None else 0,
-            "task_title": result.get("task_title"),
-            "task_description": result.get("task_description"),
+            # "followup_days": int(result.get("followup_days", 0)) if result.get("followup_days") is not None else 0,
+            # "task_title": result.get("task_title"),
+            # "task_description": result.get("task_description"),
             "next_action": result.get("next_action"),
             "next_action_type": result.get("next_action_type"),
             "auto_reply": bool(result.get("auto_reply", False)),
             "stage": result.get("stage", "Lead"),
             "amount": result.get("amount"), 
-            "leadScore": int(result.get("leadScore", 0)) if result.get("leadScore") is not None else 0,
-            "aiNextAction": result.get("aiNextAction"),
+            # "leadScore": int(result.get("leadScore", 0)) if result.get("leadScore") is not None else 0,
+            # "aiNextAction": result.get("aiNextAction"),
             "owner": result.get("owner", "Unassigned"),
         }
         print("AI Analysis Result:", lead_payload)
@@ -262,8 +294,8 @@ def submit_lead():
                 insert_message({
                     "lead_id": lead["id"],
                     "direction": "inbound",
-                    "sender": email,
-                    "recipient": "",
+                    # "sender": email,
+                    # "recipient": "",
                     "subject": company or "Lead submission",
                     "body": description,
                 })
