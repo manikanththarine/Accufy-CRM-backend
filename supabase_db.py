@@ -246,7 +246,7 @@ def map_account_for_frontend(account: dict):
         "website": clean_website or account.get("website"),
         "owner": account.get("owner") or "Unassigned",
         "leadScore": account.get("lead_score"),
-        "aiNextAction": account.get("ai_next_action"),
+        "aiNextAction": account.get("aiNextAction"),
         "priority": account.get("priority"),
         "status": account.get("status"),
         "reason": account.get("reason"),
