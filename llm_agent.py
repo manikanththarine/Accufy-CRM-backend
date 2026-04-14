@@ -5,7 +5,6 @@ import requests
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-
 def _fallback_result(reason="OpenAI failed", enrichment=None):
     enrichment = enrichment or {}
     base_score = int(enrichment.get("leadScore", 60))

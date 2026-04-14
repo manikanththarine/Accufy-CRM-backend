@@ -154,7 +154,6 @@ def api_signup():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route("/api/login", methods=["POST"])
 def api_login():
     try:
@@ -214,12 +213,12 @@ def submit_lead():
             return jsonify({"status": "error", "message": "At least one lead field is required"}), 400
 
         ai_input = f"""
-        Name: {name}
-        Email: {email}
-        Company: {company}
-        Source: {source}
-        Description: {description}
-        """
+Name: {name}
+Email: {email}
+Company: {company}
+Source: {source}
+Description: {description}
+"""
 
         result = analyze_lead_with_llm(text=description, company=company, email=email, job_title=jobTitle, enrichment={})
 
@@ -242,12 +241,16 @@ def submit_lead():
             "next_action": result.get("next_action"),
             "next_action_type": result.get("next_action_type"),
             "auto_reply": result.get("auto_reply", False),
+            "leadScore": int(result.get("leadScore", 0)) if result.get("leadScore") is not None else 0,
+            "aiNextAction": result.get("aiNextAction"),
         }
-
+        print("Lead payload to insert:", lead_payload)
+        print("LLM result:", result)
+        
         lead = insert_lead(lead_payload)
 
         if lead and description:
-            insert_message(
+           insert_message(
                 {
                     "lead_id": lead["id"],
                     "direction": "inbound",
@@ -273,7 +276,6 @@ def submit_lead():
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
 
 # -----------------------------
 # Inbound email handling
@@ -366,7 +368,6 @@ def api_lead_detail(lead_id: int):
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route("/api/dashboard-stats", methods=["GET"])
 def api_dashboard_stats():
     try:
@@ -409,7 +410,6 @@ def api_gmail_connect():
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
 
 @app.route("/api/gmail/callback", methods=["GET"])
 def api_gmail_callback():
@@ -477,7 +477,6 @@ def api_gmail_status():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 @app.route("/api/gmail/sync", methods=["POST"])
 def api_gmail_sync():
     try:
@@ -521,4 +520,4 @@ def api_account_detail(account_id: int):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "1000"))
     app.run(host="0.0.0.0", port=port, debug=True) 
-# changed api key
+
