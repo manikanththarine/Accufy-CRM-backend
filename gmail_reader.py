@@ -72,7 +72,6 @@ def extract_domain(email_address: str) -> Optional[str]:
         return None
     return domain
 
-
 def parse_email_address(raw_from: str):
     name, email_address = email.utils.parseaddr(raw_from or "")
     return {
