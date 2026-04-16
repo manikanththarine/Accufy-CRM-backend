@@ -46,14 +46,14 @@ def utc_now_iso():
     return utc_now().isoformat()
 
 
-def normalize_email(email: str) -> str:
+def normalize_email(email: str):
     return (email or "").strip().lower()
 
 
 def extract_email(text: str):
     if not text:
         return None
-    match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+    match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
     return match.group(0).lower() if match else None
 
 
@@ -152,16 +152,16 @@ def api_signup():
         return jsonify({"status": "success", "user": user}), 201
 
     except Exception as e:
+        print("SIGNUP ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
     try:
-        
         data = request.get_json() or {}
         email = normalize_email(data.get("email"))
         password = (data.get("password") or "").strip()
-        print("Login attempt for email:", email)
 
         if not email or not password:
             return jsonify({"status": "error", "message": "email and password are required"}), 400
@@ -173,6 +173,7 @@ def api_login():
         return jsonify({"status": "success", "user": user}), 200
 
     except Exception as e:
+        print("LOGIN ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -193,34 +194,40 @@ def api_forgot_password():
         return jsonify({"status": "success", "message": "Password updated successfully"}), 200
 
     except Exception as e:
+        print("FORGOT PASSWORD ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # -----------------------------
-# Lead submission + AI scoring
+# Form submit flow
+# Auto-email is allowed here
 # -----------------------------
-@app.route("/submit", methods=["POST"])
-def submit_lead():
+@app.route("/api/form-submit", methods=["POST"])
+def api_form_submit():
     try:
         data = request.get_json() or {}
+
         name = (data.get("name") or "").strip()
         email = normalize_email(data.get("email"))
         company = (data.get("company") or "").strip()
-        source = (data.get("source") or "manual").strip()
+        source = (data.get("source") or "form").strip()
         description = (data.get("description") or "").strip()
-        jobTitle = (data.get("jobTitle") or "").strip()
-        if not name and not email and not company and not description:
-            return jsonify({"status": "error", "message": "At least one lead field is required"}), 400
+        job_title = (data.get("jobTitle") or "").strip()
+        send_auto_email = bool(data.get("send_auto_email", True))
 
-        ai_input = f"""
-Name: {name}
-Email: {email}
-Company: {company}
-Source: {source}
-Description: {description}
-"""
+        if not description and not email and not company:
+            return jsonify({
+                "status": "error",
+                "message": "At least description, email, or company is required"
+            }), 400
 
-        result = analyze_lead_with_llm(text=description, company=company, email=email, job_title=jobTitle, enrichment={})
+        result = analyze_lead_with_llm(
+            text=description,
+            company=company,
+            email=email,
+            job_title=job_title,
+            enrichment={},
+        ) or {}
 
         lead_payload = {
             "name": name,
@@ -241,22 +248,23 @@ Description: {description}
             "next_action": result.get("next_action"),
             "next_action_type": result.get("next_action_type"),
             "auto_reply": result.get("auto_reply", False),
-            "leadScore": int(result.get("leadScore", 0)) if result.get("leadScore") is not None else 0,
-            "aiNextAction": result.get("aiNextAction"),
+            "stage": result.get("stage"),
+            "amount": result.get("amount"),
+            "leadScore": int(result.get("leadScore", result.get("score", 50))),
+            "aiNextAction": result.get("aiNextAction", result.get("next_action")),
+            "owner": result.get("owner", "Unassigned"),
         }
-        print("Lead payload to insert:", lead_payload)
-        print("LLM result:", result)
-        
+
         lead = insert_lead(lead_payload)
 
         if lead and description:
-           insert_message(
+            insert_message(
                 {
                     "lead_id": lead["id"],
                     "direction": "inbound",
                     "sender": email,
                     "recipient": "",
-                    "subject": company or "Lead submission",
+                    "subject": company or "Form submission",
                     "body": description,
                 }
             )
@@ -265,17 +273,44 @@ Description: {description}
         if lead:
             task = create_followup_task_if_needed(lead["id"], result)
 
+        email_sent = False
+        email_error = None
+
+        if send_auto_email and email and result.get("auto_reply") and result.get("reply_message"):
+            try:
+                send_email(
+                    to=email,
+                    subject=result.get("email_subject") or "Thanks for reaching out",
+                    body=result.get("reply_message"),
+                )
+                email_sent = True
+            except Exception as e:
+                email_error = str(e)
+                print("FORM EMAIL ERROR:", email_error)
+
         return jsonify(
             {
                 "status": "success",
                 "lead": lead,
                 "task": task,
                 "ai": result,
+                "email_sent": email_sent,
+                "email_error": email_error,
             }
         ), 201
 
     except Exception as e:
+        print("FORM SUBMIT ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# -----------------------------
+# Lead submission legacy endpoint
+# -----------------------------
+@app.route("/submit", methods=["POST"])
+def submit_lead():
+    return api_form_submit()
+
 
 # -----------------------------
 # Inbound email handling
@@ -291,7 +326,13 @@ def inbound_email():
         if not sender and not body:
             return jsonify({"status": "error", "message": "Email sender/body missing"}), 400
 
-        ai_result = analyze_reply_action(subject=subject, body=body)
+        ai_result = analyze_reply_action(
+            text=body,
+            company="",
+            email=sender,
+            job_title="",
+            enrichment={},
+        )
 
         leads = get_all_leads()
         matched_lead = None
@@ -331,6 +372,7 @@ def inbound_email():
         ), 200
 
     except Exception as e:
+        print("INBOUND EMAIL ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -343,6 +385,7 @@ def api_leads():
         leads = get_all_leads()
         return jsonify({"status": "success", "leads": leads}), 200
     except Exception as e:
+        print("LEADS ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -366,7 +409,9 @@ def api_lead_detail(lead_id: int):
         ), 200
 
     except Exception as e:
+        print("LEAD DETAIL ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route("/api/dashboard-stats", methods=["GET"])
 def api_dashboard_stats():
@@ -392,11 +437,13 @@ def api_dashboard_stats():
         ), 200
 
     except Exception as e:
+        print("DASHBOARD STATS ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # -----------------------------
 # Gmail integration
+# No automatic outbound email here
 # -----------------------------
 @app.route("/api/gmail/connect", methods=["GET"])
 def api_gmail_connect():
@@ -409,7 +456,9 @@ def api_gmail_connect():
         return jsonify({"status": "success", "auth_url": auth_url}), 200
 
     except Exception as e:
+        print("GMAIL CONNECT ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route("/api/gmail/callback", methods=["GET"])
 def api_gmail_callback():
@@ -453,6 +502,7 @@ def api_gmail_callback():
         ), 200
 
     except Exception as e:
+        print("GMAIL CALLBACK ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -475,27 +525,34 @@ def api_gmail_status():
         ), 200
 
     except Exception as e:
+        print("GMAIL STATUS ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.route("/api/gmail/sync", methods=["POST"])
 def api_gmail_sync():
     try:
-        data = request.get_json() or {}
+        data = request.get_json(force=True) or {}
         crm_user_email = normalize_email(data.get("crm_user_email"))
-        max_pages = int(data.get("max_pages", 20))
+        max_pages = int(data.get("max_pages", 1))
 
         if not crm_user_email:
             return jsonify({"status": "error", "message": "crm_user_email is required"}), 400
 
-        result = sync_gmail_accounts_for_user(crm_user_email, max_pages=max_pages)
+        result = sync_gmail_accounts_for_user(
+            crm_user_email=crm_user_email,
+            max_pages=max_pages,
+        )
+
         return jsonify(result), 200
 
     except Exception as e:
+        print("GMAIL SYNC ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # -----------------------------
-# Accounts API for frontend
+# Accounts API
 # -----------------------------
 @app.route("/api/accounts", methods=["GET"])
 def api_accounts():
@@ -503,6 +560,7 @@ def api_accounts():
         accounts = get_all_accounts()
         return jsonify({"status": "success", "accounts": accounts}), 200
     except Exception as e:
+        print("ACCOUNTS ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -514,10 +572,10 @@ def api_account_detail(account_id: int):
             return jsonify({"status": "error", "message": "Account not found"}), 404
         return jsonify({"status": "success", "account": account}), 200
     except Exception as e:
+        print("ACCOUNT DETAIL ERROR:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "1000"))
     app.run(host="0.0.0.0", port=port, debug=True) 
-

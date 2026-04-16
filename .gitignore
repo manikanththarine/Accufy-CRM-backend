@@ -8,3 +8,8 @@ token.json
 credentials.json
 node_modules/
 dist/
+crm-frontend-demo/
+Accufy-CRM/
+node_modules/
+.venv/
+.DS_Store

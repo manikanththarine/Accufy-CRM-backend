@@ -4,12 +4,8 @@ import re
 import requests
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-print ("check", OPENAI_API_KEY)
 
 
-# -------------------------------------------------------------------
-# Generic fallback for CRM lead scoring
-# -------------------------------------------------------------------
 def _fallback_result(reason="OpenAI failed", enrichment=None):
     enrichment = enrichment or {}
     base_score = int(enrichment.get("leadScore", 60))
@@ -36,9 +32,6 @@ def _fallback_result(reason="OpenAI failed", enrichment=None):
     }
 
 
-# -------------------------------------------------------------------
-# Safe JSON parsing from model output
-# -------------------------------------------------------------------
 def _parse_json_safely(text):
     text = (text or "").strip()
 
@@ -57,9 +50,6 @@ def _parse_json_safely(text):
         return {}
 
 
-# -------------------------------------------------------------------
-# Low-level OpenAI Responses API caller
-# -------------------------------------------------------------------
 def _call_openai_json(prompt: str, fallback: dict):
     if not OPENAI_API_KEY:
         return fallback
@@ -102,23 +92,13 @@ def _call_openai_json(prompt: str, fallback: dict):
         return fallback
 
 
-# -------------------------------------------------------------------
-# Lead scoring / CRM action analysis
-# -------------------------------------------------------------------
-def analyze_with_openai(text, company, email, job_title, enrichment=None):
+def analyze_with_openai(text, company, email, job_title="", enrichment=None):
     enrichment = enrichment or {}
 
-    if not OPENAI_API_KEY:
-        return _fallback_result("OPENAI_API_KEY missing", enrichment=enrichment)
+    fallback = _fallback_result("OpenAI fallback used", enrichment=enrichment)
 
     prompt = f"""
 You are a CRM AI assistant.
-
-Your job:
-1. Score the lead based on business interest.
-2. Suggest CRM next actions.
-3. Use enrichment data as context.
-4. Do NOT invent factual company data. Keep provided enrichment values unchanged.
 
 Return ONLY valid JSON in this exact structure:
 {{
@@ -143,25 +123,18 @@ Return ONLY valid JSON in this exact structure:
 }}
 
 Rules:
-- Score must be between 10 and 100.
-- leadScore must equal score.
-- Use realistic values.
-- Never overwrite factual enrichment fields in the backend.
-- If the user message is weak or generic, keep score moderate.
+- score must be between 10 and 100
+- leadScore must equal score
+- be realistic
+- if message is generic, keep score moderate
 
-Lead context:
+Context:
 - Company: {company or enrichment.get("account") or "Unknown Company"}
 - Email: {email or ""}
-- Job title: {job_title or enrichment.get("title") or ""}
-- Industry: {enrichment.get("industry", "Unknown")}
-- Revenue: {enrichment.get("revenue", "Unknown")}
-- Headcount: {enrichment.get("headcount", "Unknown")}
-- LinkedIn: {enrichment.get("linkedin") or ""}
-- Website: {enrichment.get("website") or ""}
+- Job title: {job_title or ""}
 - Message: {text or ""}
 """.strip()
 
-    fallback = _fallback_result("OpenAI fallback used", enrichment=enrichment)
     result = _call_openai_json(prompt, fallback)
 
     score = int(result.get("score", enrichment.get("leadScore", 60)))
@@ -172,7 +145,7 @@ Lead context:
         "score": score,
         "priority": result.get("priority", "medium"),
         "status": result.get("status", "Warm"),
-        "reason": result.get("reason", "Lead submitted form"),
+        "reason": result.get("reason", "Lead submitted"),
         "reply_message": result.get(
             "reply_message",
             "Thank you for your interest. We will get back to you shortly."
@@ -198,89 +171,7 @@ Lead context:
     }
 
 
-# -------------------------------------------------------------------
-# AI company enrichment
-# -------------------------------------------------------------------
-def enrich_company_with_ai(domain: str, sender_name: str = "", sender_email: str = "", subject: str = "", snippet: str = ""):
-    company_hint = domain.split(".")[0].replace("-", " ").replace("_", " ").title() if domain else "Unknown"
-
-    fallback = {
-        "company_name": company_hint,
-        "website": f"https://{domain}" if domain else None,
-        "linkedin": None,
-        "industry": None,
-        "revenue": None,
-        "headcount": None,
-        "last_funding": None,
-        "title": None,
-        "stage": "New",
-        "amount": None,
-        "icon": company_hint[:1].upper() if company_hint else "?",
-        "accountIcon": company_hint[:1].upper() if company_hint else "?",
-        "apollo_status": "not_used_ai_only",
-    }
-
-    if not domain:
-        return fallback
-
-    prompt = f"""
-You are enriching CRM account data from email and company domain context.
-
-Return ONLY valid JSON in this exact structure:
-{{
-  "company_name": "string",
-  "website": "string or null",
-  "linkedin": "string or null",
-  "industry": "string or null",
-  "revenue": "string or null",
-  "headcount": "string or null",
-  "last_funding": "string or null",
-  "title": "string or null",
-  "stage": "New | Qualified | Proposal | Negotiation | Won | Lost",
-  "amount": null,
-  "icon": "single character",
-  "accountIcon": "single character"
-}}
-
-Rules:
-- Do not invent exact facts if uncertain.
-- Use null if the value is not reasonably inferable.
-- revenue and headcount should be estimates or ranges, not exact claims.
-- website should default to https://{domain} if no better option is inferable.
-- icon and accountIcon should be the first letter of the company name.
-
-Context:
-- Domain: {domain}
-- Sender Name: {sender_name}
-- Sender Email: {sender_email}
-- Subject: {subject}
-- Message Snippet: {snippet}
-- Company Hint: {company_hint}
-""".strip()
-
-    result = _call_openai_json(prompt, fallback)
-
-    company_name = result.get("company_name") or company_hint
-    icon_value = company_name[:1].upper() if company_name else "?"
-
-    return {
-        "company_name": company_name,
-        "website": result.get("website") or f"https://{domain}",
-        "linkedin": result.get("linkedin"),
-        "industry": result.get("industry"),
-        "revenue": result.get("revenue"),
-        "headcount": result.get("headcount"),
-        "last_funding": result.get("last_funding"),
-        "title": result.get("title"),
-        "stage": result.get("stage") or "New",
-        "amount": result.get("amount"),
-        "icon": result.get("icon") or icon_value,
-        "accountIcon": result.get("accountIcon") or icon_value,
-        "apollo_status": "replaced_by_ai",
-    }
-
-
-def analyze_lead_with_llm(text, company, email, job_title, enrichment=None):
+def analyze_lead_with_llm(text, company, email, job_title="", enrichment=None):
     return analyze_with_openai(
         text=text,
         company=company,
@@ -290,7 +181,7 @@ def analyze_lead_with_llm(text, company, email, job_title, enrichment=None):
     )
 
 
-def analyze_reply_action(text, company, email, job_title, enrichment=None):
+def analyze_reply_action(text, company, email, job_title="", enrichment=None):
     return analyze_with_openai(
         text=text,
         company=company,

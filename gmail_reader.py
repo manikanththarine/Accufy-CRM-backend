@@ -1,109 +1,123 @@
+import base64
 import os
-import email.utils
-from typing import Optional
+from email.utils import parseaddr
 
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 
-PERSONAL_DOMAINS = {
-    "gmail.com",
-    "yahoo.com",
-    "outlook.com",
-    "hotmail.com",
-    "icloud.com",
-    "live.com",
-    "proton.me",
-    "protonmail.com",
-}
+def extract_domain(email: str):
+    if not email or "@" not in email:
+        return None
+    return email.split("@")[-1].lower().strip()
 
 
-def get_gmail_service(refresh_token: str):
+def _get_access_token_from_refresh_token(refresh_token: str):
     creds = Credentials(
-        token=None,
+        None,
         refresh_token=refresh_token,
         token_uri="https://oauth2.googleapis.com/token",
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
         scopes=["https://www.googleapis.com/auth/gmail.readonly"],
     )
+    creds.refresh(Request())
+    return creds
+
+
+def get_gmail_service(refresh_token: str):
+    creds = _get_access_token_from_refresh_token(refresh_token)
     return build("gmail", "v1", credentials=creds)
 
 
-def list_all_messages(service, label_ids=None, max_pages: int = 20):
-    all_messages = []
+def list_all_messages(service, label_ids=None, max_pages: int = 1):
+    label_ids = label_ids or ["INBOX"]
+    messages = []
     page_token = None
-    pages = 0
+    pages_read = 0
 
-    while pages < max_pages:
-        result = (
-            service.users()
-            .messages()
-            .list(
-                userId="me",
-                labelIds=label_ids or ["INBOX"],
-                maxResults=100,
-                pageToken=page_token,
-            )
-            .execute()
-        )
-        all_messages.extend(result.get("messages", []))
+    while pages_read < max_pages:
+        result = service.users().messages().list(
+            userId="me",
+            labelIds=label_ids,
+            maxResults=50,
+            pageToken=page_token,
+        ).execute()
+
+        messages.extend(result.get("messages", []))
         page_token = result.get("nextPageToken")
-        pages += 1
+        pages_read += 1
 
         if not page_token:
             break
 
-    return all_messages
+    return messages
 
 
-def _get_header(headers, name: str) -> str:
-    for item in headers:
-        if item.get("name", "").lower() == name.lower():
-            return item.get("value", "")
+def _decode_base64url(data: str):
+    if not data:
+        return ""
+    try:
+        padded = data + "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(padded.encode()).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _extract_headers(payload):
+    headers = payload.get("headers", []) or []
+    header_map = {}
+    for h in headers:
+        name = (h.get("name") or "").lower()
+        value = h.get("value") or ""
+        header_map[name] = value
+    return header_map
+
+
+def _extract_text_from_payload(payload):
+    mime_type = payload.get("mimeType", "")
+    body_data = payload.get("body", {}).get("data")
+
+    if mime_type == "text/plain" and body_data:
+        return _decode_base64url(body_data)
+
+    parts = payload.get("parts", []) or []
+    for part in parts:
+        part_type = part.get("mimeType", "")
+        part_data = part.get("body", {}).get("data")
+        if part_type == "text/plain" and part_data:
+            return _decode_base64url(part_data)
+
+    for part in parts:
+        part_type = part.get("mimeType", "")
+        part_data = part.get("body", {}).get("data")
+        if part_type == "text/html" and part_data:
+            return _decode_base64url(part_data)
+
     return ""
 
 
-def extract_domain(email_address: str) -> Optional[str]:
-    if not email_address or "@" not in email_address:
-        return None
-    domain = email_address.split("@")[-1].strip().lower()
-    if domain in PERSONAL_DOMAINS:
-        return None
-    return domain
-
-def parse_email_address(raw_from: str):
-    name, email_address = email.utils.parseaddr(raw_from or "")
-    return {
-        "sender_name": name.strip() or None,
-        "sender_email": email_address.strip().lower() or None,
-    }
-
-
 def fetch_and_parse_message(service, message_id: str):
-    msg = (
-        service.users()
-        .messages()
-        .get(userId="me", id=message_id, format="full")
-        .execute()
-    )
+    msg = service.users().messages().get(userId="me", id=message_id, format="full").execute()
 
-    payload = msg.get("payload", {})
-    headers = payload.get("headers", [])
-    internal_date_ms = msg.get("internalDate")
+    payload = msg.get("payload", {}) or {}
+    headers = _extract_headers(payload)
 
-    from_raw = _get_header(headers, "From")
-    subject = _get_header(headers, "Subject")
+    from_header = headers.get("from", "")
+    subject = headers.get("subject", "")
+    sender_name, sender_email = parseaddr(from_header)
 
-    parsed_sender = parse_email_address(from_raw)
-    snippet = msg.get("snippet", "")
+    body_text = _extract_text_from_payload(payload)
+    snippet = msg.get("snippet") or body_text[:300]
 
     return {
         "gmail_message_id": msg.get("id"),
         "thread_id": msg.get("threadId"),
         "subject": subject,
+        "sender_name": sender_name,
+        "sender_email": sender_email.lower().strip() if sender_email else "",
         "snippet": snippet,
-        "sender_name": parsed_sender.get("sender_name"),
-        "sender_email": parsed_sender.get("sender_email"),
-        "received_at_unix_ms": internal_date_ms,
+        "body": body_text,
+        "received_at_unix_ms": msg.get("internalDate"),
     } 

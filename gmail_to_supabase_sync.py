@@ -6,7 +6,6 @@ from gmail_reader import (
     fetch_and_parse_message,
     extract_domain,
 )
-from company_enrichment import enrich_company_from_domain
 from supabase_db import (
     get_gmail_connection,
     upsert_account,
@@ -16,22 +15,13 @@ from supabase_db import (
 from llm_agent import analyze_lead_with_llm
 
 
-# -------------------------------------------------------------------
-# Utility helpers
-# -------------------------------------------------------------------
 def utc_now_iso() -> str:
-    """Return current UTC time in ISO format."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _ms_to_iso(ms_value):
-    """
-    Convert Gmail internal timestamp (milliseconds) to ISO datetime.
-    If timestamp is missing or invalid, fallback to current UTC time.
-    """
     if not ms_value:
         return utc_now_iso()
-
     try:
         ts = int(ms_value) / 1000.0
         return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
@@ -39,55 +29,19 @@ def _ms_to_iso(ms_value):
         return utc_now_iso()
 
 
-def _safe_text(value, default=""):
-    """Normalize text fields safely."""
-    return (value or default).strip()
-
-
-def build_logo_url(domain: str) -> str:
-    """
-    Build a lightweight favicon/logo URL from domain.
-    This gives the frontend a logo-like image without Apollo.
-    """
-    if not domain:
-        return ""
-    return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
-
-
-def build_icon_fallback(company_name: str) -> str:
-    """
-    Fallback single-letter icon when no image/logo is available.
-    """
-    if not company_name:
-        return "?"
-    return company_name[:1].upper()
-
-
-# -------------------------------------------------------------------
-# AI lead scoring from email content
-# -------------------------------------------------------------------
-def score_email_with_ai(
-    subject: str,
-    snippet: str,
-    sender_email: str,
-    company_name: str,
-    title: str = None,
-    enrichment: dict = None,
-):
-    enrichment = enrichment or {}
+def score_email_with_ai(subject: str, snippet: str, sender_email: str, company_name: str):
     text = f"""
-    sender: {sender_email}
-    company: {company_name}
-    subject: {subject or ''}
-    message: {snippet or ''}
-    """
+Sender: {sender_email}
+Company: {company_name}
+Subject: {subject or ''}
+Message: {snippet or ''}
+"""
+
     try:
         result = analyze_lead_with_llm(
             text=text,
             company=company_name,
             email=sender_email,
-            job_title=title or "",
-            enrichment=enrichment,
         ) or {}
 
         return {
@@ -95,173 +49,134 @@ def score_email_with_ai(
             "priority": result.get("priority", "medium"),
             "status": result.get("status", "Warm"),
             "aiNextAction": result.get("aiNextAction", result.get("next_action", "Manual review")),
-            "reason": result.get("reason", "AI scoring completed"),
-            "stage": result.get("stage", "Lead"),
+            "reason": result.get("reason", "AI processed"),
+            "owner": result.get("owner", "Unassigned"),
         }
 
-    except Exception:
+    except Exception as e:
+        print("AI ERROR:", str(e))
         return {
             "leadScore": 50,
             "priority": "medium",
             "status": "Warm",
             "aiNextAction": "Manual review",
-            "reason": "AI scoring fallback used during Gmail sync",
-            "stage": "Lead",
+            "reason": "AI fallback",
+            "owner": "Unassigned",
         }
 
-# -------------------------------------------------------------------
-# Main Gmail -> Supabase sync
-# -------------------------------------------------------------------
-def sync_gmail_accounts_for_user(crm_user_email: str, max_pages: int = 20) -> dict:
-    """
-    Sync Gmail inbox messages for a CRM user and convert them into
-    structured CRM account/contact/email activity data.
 
-    Flow:
-    1. Load saved Gmail OAuth connection
-    2. Build Gmail API service
-    3. Read inbox messages
-    4. Extract sender/company/domain
-    5. Enrich company using AI
-    6. Score lead using AI
-    7. Upsert account/contact/activity into Supabase
-    """
+def sync_gmail_accounts_for_user(crm_user_email: str, max_pages: int = 1) -> dict:
     connection = get_gmail_connection(crm_user_email)
+
     if not connection:
         raise ValueError("Gmail not connected for this CRM user")
 
     refresh_token = connection.get("refresh_token")
-    if not refresh_token:
-        raise ValueError("Refresh token not found for this CRM user")
 
-    # Create Gmail service
+    if not refresh_token:
+        raise ValueError("Refresh token missing")
+
     service = get_gmail_service(refresh_token)
 
-    # Read inbox messages
-    messages = list_all_messages(service, label_ids=["INBOX"], max_pages=max_pages)
+    messages = list_all_messages(
+        service,
+        label_ids=["INBOX"],
+        max_pages=max_pages,
+    )
 
     processed = 0
     skipped = 0
     accounts_updated = 0
 
-    for msg in messages:
-        parsed = fetch_and_parse_message(service, msg["id"])
+    for i, msg in enumerate(messages):
+        if i >= 3:
+            break
 
-        sender_email = _safe_text(parsed.get("sender_email"))
-        sender_name = _safe_text(parsed.get("sender_name"))
-        subject = _safe_text(parsed.get("subject"))
-        snippet = _safe_text(parsed.get("snippet"))
-        domain = extract_domain(sender_email)
+        try:
+            parsed = fetch_and_parse_message(service, msg["id"])
 
-        # Skip rows where sender/domain cannot be identified
-        if not sender_email or not domain:
-            skipped += 1
-            continue
+            sender_email = parsed.get("sender_email")
+            sender_name = parsed.get("sender_name")
+            domain = extract_domain(sender_email)
 
-        processed += 1
-        received_at_iso = _ms_to_iso(parsed.get("received_at_unix_ms"))
+            if not sender_email or not domain:
+                skipped += 1
+                continue
 
-        # -------------------------------------------------------------------
-        # AI-based company enrichment
-        # -------------------------------------------------------------------
-        # This now uses company_enrichment.py -> llm_agent.py instead of Apollo.
-        enriched = enrich_company_from_domain(
-            domain=domain,
-            sender_name=sender_name,
-            sender_email=sender_email,
-            subject=subject,
-            snippet=snippet,
-        )
+            processed += 1
 
-        company_name = enriched.get("company_name") or domain.split(".")[0].title()
-        logo_url = enriched.get("accountIcon") or build_logo_url(domain)
-        icon_fallback = enriched.get("icon") or build_icon_fallback(company_name)
+            company_name = domain.split(".")[0].title()
+            received_at_iso = _ms_to_iso(parsed.get("received_at_unix_ms"))
 
-        # -------------------------------------------------------------------
-        # AI-based lead scoring
-        # -------------------------------------------------------------------
-        ai = score_email_with_ai(
-            subject=subject,
-            snippet=snippet,
-            sender_email=sender_email,
-            company_name=company_name,
-            title=enriched.get("title"),
-            enrichment={
-                "account": company_name,
-                "title": enriched.get("title"),
-                "industry": enriched.get("industry"),
-                "revenue": enriched.get("revenue"),
-                "headcount": enriched.get("headcount"),
-                "linkedin": enriched.get("linkedin"),
-                "website": enriched.get("website"),
-            },
-        )
+            ai = score_email_with_ai(
+                subject=parsed.get("subject"),
+                snippet=parsed.get("snippet"),
+                sender_email=sender_email,
+                company_name=company_name,
+            )
 
-        # -------------------------------------------------------------------
-        # Account upsert payload
-        # -------------------------------------------------------------------
-        # IMPORTANT:
-        # We are now storing frontend-friendly CRM fields directly.
-        account_payload = {
-            "company_name": company_name,
-            "icon": icon_fallback,
-            "owner": ai.get("owner", "Unassigned"),
-            "industry": enriched.get("industry"),
-            "status": ai.get("status"),
-            "revenue": enriched.get("revenue"),
-            "headcount": enriched.get("headcount"),
-            "lead_score": ai.get("leadScore"),
-            "ai_next_action": ai.get("aiNextAction"),
-            "last_interaction": received_at_iso,
-            "last_funding": enriched.get("last_funding"),
-            "linkedin": enriched.get("linkedin"),
-            "website": enriched.get("website") or f"https://{domain}",
-            "priority": ai.get("priority"),
-            "reason": ai.get("reason"),
-            "source": "gmail_ai",
-            "domain": domain,
-            "updated_at": utc_now_iso(),
-        }
-
-        account = upsert_account(account_payload)
-        if not account:
-            continue
-
-        # -------------------------------------------------------------------
-        # Contact upsert
-        # -------------------------------------------------------------------
-        upsert_contact(
-            {
-                "account_id": account["id"],
-                "name": sender_name or sender_email.split("@")[0],
-                "email": sender_email,
-                "title": enriched.get("title"),
+            account_payload = {
+                "company_name": company_name,
+                "domain": domain,
+                "icon": company_name[:1].upper(),
+                "industry": None,
+                "revenue": None,
+                "headcount": None,
+                "last_funding": None,
                 "linkedin": None,
-                "source": "gmail_ai",
+                "website": f"https://{domain}",
+                "owner": ai.get("owner"),
+                "source": "gmail",
+                "last_interaction": received_at_iso,
+                "lead_score": ai.get("leadScore"),
+                "priority": ai.get("priority"),
+                "status": ai.get("status"),
+                "ai_next_action": ai.get("aiNextAction"),
+                "reason": ai.get("reason"),
                 "updated_at": utc_now_iso(),
             }
-        )
 
-        # -------------------------------------------------------------------
-        # Store email activity for audit/timeline/history
-        # -------------------------------------------------------------------
-        insert_account_email_activity(
-            {
-                "account_id": account["id"],
-                "sender_email": sender_email,
-                "subject": subject,
-                "snippet": snippet,
-                "received_at": received_at_iso,
-                "thread_id": parsed.get("thread_id"),
-                "gmail_message_id": parsed.get("gmail_message_id"),
-            }
-        )
+            account = upsert_account(account_payload)
 
-        accounts_updated += 1
+            if not account:
+                continue
 
-    # -------------------------------------------------------------------
-    # Final sync summary
-    # -------------------------------------------------------------------
+            try:
+                upsert_contact(
+                    {
+                        "account_id": account["id"],
+                        "name": sender_name,
+                        "email": sender_email,
+                        "title": None,
+                        "linkedin": None,
+                        "source": "gmail",
+                        "updated_at": utc_now_iso(),
+                    }
+                )
+            except Exception as e:
+                print("CONTACT ERROR:", e)
+
+            try:
+                insert_account_email_activity(
+                    {
+                        "account_id": account["id"],
+                        "sender_email": sender_email,
+                        "subject": parsed.get("subject"),
+                        "snippet": parsed.get("snippet"),
+                        "received_at": received_at_iso,
+                        "thread_id": parsed.get("thread_id"),
+                        "gmail_message_id": parsed.get("gmail_message_id"),
+                    }
+                )
+            except Exception as e:
+                print("ACTIVITY ERROR:", e)
+
+            accounts_updated += 1
+
+        except Exception as e:
+            print("GMAIL LOOP ERROR:", str(e))
+            continue
+
     return {
         "status": "success",
         "crm_user_email": crm_user_email,
